@@ -1,0 +1,34 @@
+# O contexto de build e enviado inteiro ao daemon do Docker. Sem esta lista, o
+# .venv (centenas de MB) e os caches seriam transferidos a cada `build`,
+# deixando o deploy lento sem necessidade nenhuma.
+
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+
+.git/
+.gitignore
+
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Segredos NUNCA entram na imagem: sao injetados em tempo de execucao pelo
+# `env_file` do compose.
+.env
+*.env
+!.env.example
+
+# Repositorio separado, clonado apenas para integrar a pagina
+prototipo-site/
+prototipo/
+
+# Respostas reais capturadas da API
+resposta-*.json
+*.db
+
+.vscode/
+.idea/

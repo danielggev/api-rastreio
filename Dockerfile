@@ -5,10 +5,17 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-COPY pyproject.toml README.md ./
+COPY pyproject.toml README.md alembic.ini ./
 COPY app ./app
 
 RUN pip install --no-cache-dir --upgrade pip && pip install --no-cache-dir .
+
+# Migrations e utilitarios operacionais. Nao entram no pacote Python, mas sao
+# executados de dentro do container:
+#   alembic upgrade head        -> precisa de alembic.ini e alembic/
+#   python scripts/expurgar.py  -> rodado pelo cron do expurgo LGPD
+COPY alembic ./alembic
+COPY scripts ./scripts
 
 # Usuario sem privilegios: um comprometimento da aplicacao nao vira root no
 # container.
