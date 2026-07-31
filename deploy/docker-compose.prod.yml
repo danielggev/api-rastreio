@@ -1,0 +1,79 @@
+# Producao: Caddy (TLS) -> API -> Postgres
+#
+#   docker compose -f deploy/docker-compose.prod.yml up -d
+#
+# Diferenca crucial para o compose de desenvolvimento: a API NAO publica porta
+# no host. So o Caddy alcanca a aplicacao, e so o Caddy fala com a internet.
+
+services:
+  db:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-rastreio}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?defina POSTGRES_PASSWORD no .env}
+      POSTGRES_DB: ${POSTGRES_DB:-rastreio}
+    volumes:
+      - dados_pg:/var/lib/postgresql/data
+    # Sem `ports`: o banco nao fica exposto na internet. O acesso e pela rede
+    # interna do compose.
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-rastreio}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  api:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    env_file: ../.env
+    environment:
+      ENV: production
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-rastreio}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-rastreio}
+      # Faixa privada do Docker. A API so recebe conexao do Caddy, entao aceitar
+      # a faixa interna e seguro -- e necessario, porque o IP do container do
+      # proxy muda a cada `up`.
+      TRUSTED_PROXIES: "172.16.0.0/12,192.168.0.0/16,10.0.0.0/8"
+    depends_on:
+      db:
+        condition: service_healthy
+    # workers=1 e DELIBERADO: o rate limit conta em memoria, por processo. Com N
+    # workers o limite efetivo seria N vezes maior, desligando na pratica a
+    # defesa principal contra enumeracao de pedidos. A centenas de consultas por
+    # dia, um worker resolve com folga; se o volume crescer, migrar para Redis
+    # ANTES de aumentar este numero.
+    command: >
+      uvicorn app.main:app
+      --host 0.0.0.0 --port 8000
+      --workers 1
+      --proxy-headers
+      --forwarded-allow-ips=*
+    # `forwarded-allow-ips=*` so e seguro porque esta porta NAO esta publicada:
+    # a unica origem possivel e o Caddy, na rede interna.
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    environment:
+      # Dominio publico da API. Trocar aqui (via .env) e o unico passo para
+      # migrar do sslip.io para um dominio proprio.
+      API_DOMINIO: ${API_DOMINIO:?defina API_DOMINIO no .env}
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_dados:/data
+      - caddy_config:/config
+      - caddy_logs:/var/log/caddy
+    depends_on:
+      - api
+
+volumes:
+  dados_pg:
+  caddy_dados:
+  caddy_config:
+  caddy_logs:

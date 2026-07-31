@@ -1,0 +1,44 @@
+services:
+  db:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: rastreio
+      POSTGRES_PASSWORD: rastreio
+      POSTGRES_DB: rastreio
+    ports:
+      - "5432:5432"
+    volumes:
+      - dados_pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U rastreio -d rastreio"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  api:
+    build: .
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+psycopg://rastreio:rastreio@db:5432/rastreio
+    ports:
+      - "8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+    # workers=1 e DELIBERADO: o rate limit conta em memoria, por processo.
+    # Com N workers o limite efetivo seria N vezes maior, desligando na pratica
+    # a defesa principal contra enumeracao. A centenas de consultas por dia um
+    # worker resolve com folga; se o volume crescer, migrar para Redis antes de
+    # aumentar este numero.
+    #
+    # --proxy-headers + --forwarded-allow-ips fazem o IP real chegar ao rate
+    # limit. Sem isso todos os visitantes viram 127.0.0.1.
+    command: >
+      uvicorn app.main:app
+      --host 0.0.0.0 --port 8000
+      --workers 1
+      --proxy-headers
+      --forwarded-allow-ips=${TRUSTED_PROXIES:-127.0.0.1}
+
+volumes:
+  dados_pg:

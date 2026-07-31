@@ -1,0 +1,69 @@
+# Producao em VPS que JA TEM Traefik rodando.
+#
+#   docker compose -f deploy/docker-compose.traefik.yml up -d --build
+#
+# Este arquivo NAO sobe proxy nenhum: reaproveita o Traefik existente, que ja
+# detem as portas 80/443 e ja emite certificado Let's Encrypt. Instalar um
+# segundo proxy derrubaria o que estiver no ar (no VPS da Hostinger, o n8n).
+#
+# A API entra como mais um servico descoberto pelo Traefik via rotulos. Como o
+# Traefik roda em rede `host`, ele alcanca o container pelo IP da bridge -- por
+# isso a API NAO publica porta alguma.
+
+services:
+  db:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-rastreio}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?defina POSTGRES_PASSWORD no .env}
+      POSTGRES_DB: ${POSTGRES_DB:-rastreio}
+    volumes:
+      - dados_pg:/var/lib/postgresql/data
+    # Banco proprio, separado do Postgres do n8n de proposito: um problema aqui
+    # nao pode afetar as automacoes que ja rodam no servidor.
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-rastreio}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  api:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    env_file: ../.env
+    environment:
+      ENV: production
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-rastreio}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-rastreio}
+      # Faixas privadas do Docker: o Traefik chega pela bridge, com IP dinamico.
+      # Sem isto o rate limit contaria todos os visitantes como um unico IP,
+      # desligando em silencio a defesa contra enumeracao de pedidos.
+      TRUSTED_PROXIES: "172.16.0.0/12,192.168.0.0/16,10.0.0.0/8"
+    depends_on:
+      db:
+        condition: service_healthy
+
+    # SEM `ports`: quem alcanca a API e apenas o Traefik, pela rede interna.
+    # E isso que torna seguro o `--forwarded-allow-ips=*` abaixo.
+
+    labels:
+      traefik.enable: "true"
+      traefik.http.routers.rastreio.entrypoints: websecure
+      traefik.http.routers.rastreio.rule: Host(`${API_DOMINIO:?defina API_DOMINIO no .env}`)
+      traefik.http.routers.rastreio.tls.certresolver: letsencrypt
+      traefik.http.services.rastreio.loadbalancer.server.port: "8000"
+
+    # workers=1 e DELIBERADO: o rate limit conta em memoria, por processo. Com N
+    # workers o limite efetivo seria N vezes maior. A centenas de consultas por
+    # dia um worker resolve; se crescer, migrar para Redis ANTES de aumentar.
+    command: >
+      uvicorn app.main:app
+      --host 0.0.0.0 --port 8000
+      --workers 1
+      --proxy-headers
+      --forwarded-allow-ips=*
+
+volumes:
+  dados_pg:

@@ -1,0 +1,29 @@
+.env
+*.env
+!.env.example
+
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Respostas reais capturadas da API, na raiz do projeto.
+resposta-*.json
+# As fixtures PRECISAM ser versionadas: sem elas os testes de ordenacao e de
+# consolidacao nao rodam.
+!tests/fixtures/resposta-*.json
+
+# Banco descartavel usado para validar migrations
+*.db
+
+# Repositorio separado, clonado apenas para a integracao da pagina
+prototipo-site/
+
+.vscode/
+.idea/

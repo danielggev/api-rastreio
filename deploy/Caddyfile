@@ -1,0 +1,41 @@
+# Proxy reverso com HTTPS automatico (Let's Encrypt).
+#
+# O dominio vem da variavel API_DOMINIO, definida no .env. Assim migrar do
+# sslip.io para um dominio proprio depois e trocar UMA linha de configuracao,
+# sem mexer neste arquivo.
+#
+#   API_DOMINIO=203-0-113-10.sslip.io          (agora, sem DNS proprio)
+#   API_DOMINIO=api.grudadoemvoce.com.br       (quando houver acesso ao DNS)
+#
+# O dominio precisa RESOLVER antes de subir: o Caddy tenta emitir o certificado
+# no primeiro boot, e tentativas com dominio invalido gastam a cota do
+# Let's Encrypt.
+
+{$API_DOMINIO} {
+	# `api` e o nome do servico no compose. A API nao publica porta no host --
+	# so o Caddy chega nela.
+	reverse_proxy api:8000
+
+	# Cabecalhos de seguranca. A API responde JSON, mas o navegador do cliente
+	# nao precisa adivinhar nada disso.
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		# A API ja envia no-store nas respostas; isto e cinto e suspensorio.
+		-Server
+	}
+
+	# O log NAO registra query string: mesmo que um dia alguma URL leve token,
+	# ele nao vaza para o disco por aqui.
+	log {
+		output file /var/log/caddy/api.log {
+			roll_size 10MiB
+			roll_keep 5
+		}
+		format json
+	}
+
+	encode gzip
+}

@@ -1,0 +1,148 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Rastreio -- protótipo</title>
+<!-- Estilos do RESULTADO: é este arquivo que vai junto na integração. -->
+<link rel="stylesheet" href="./rastreio.css">
+<style>
+  /* Daqui para baixo é só o enfeite desta página de teste -- cabeçalho,
+     formulário e atalhos. Não precisa ser copiado. */
+  /* Estilo deliberadamente neutro: a identidade Grudado em Você entra na
+     Fase 3, quando isto for para o tema. Aqui interessa a ESTRUTURA e os
+     estados, não o visual final. */
+  :root {
+    --cinza: #6b7280;
+    --azul: #2563eb;
+    --verde: #16a34a;
+    --ambar: #d97706;
+    --vermelho: #dc2626;
+    --borda: #e5e7eb;
+  }
+  * { box-sizing: border-box; }
+  body {
+    font-family: system-ui, -apple-system, sans-serif;
+    max-width: 34rem; margin: 0 auto; padding: 1.5rem;
+    color: #111827; line-height: 1.5;
+  }
+  h1 { font-size: 1.5rem; margin-bottom: .25rem; }
+  .sub { color: var(--cinza); margin-top: 0; }
+
+  form { display: grid; gap: .75rem; margin: 1.5rem 0; }
+  label { font-weight: 600; font-size: .875rem; }
+  input {
+    width: 100%; padding: .625rem .75rem; font-size: 1rem;
+    border: 1px solid var(--borda); border-radius: .5rem;
+  }
+  input:focus { outline: 2px solid var(--azul); outline-offset: 1px; }
+  button {
+    padding: .75rem 1rem; font-size: 1rem; font-weight: 600;
+    background: #111827; color: #fff; border: 0; border-radius: .5rem;
+    cursor: pointer;
+  }
+  button[disabled] { opacity: .6; cursor: progress; }
+
+  .estado {
+    font-size: .8125rem; padding: .5rem .75rem; border-radius: .375rem;
+    background: #f3f4f6; color: var(--cinza); margin: 0;
+  }
+  .estado--ok     { background:#f0fdf4; color:#166534; }
+  .estado--alerta { background:#fffbeb; color:#92400e; }
+  .estado--erro   { background:#fef2f2; color:#991b1b; }
+
+  .demo { margin-top: 2rem; padding-top: 1rem; border-top: 1px dashed var(--borda); }
+  .demo h2 { font-size: .875rem; text-transform: uppercase; color: var(--cinza); }
+  .demo button {
+    background: #fff; color: #111827; border: 1px solid var(--borda);
+    font-size: .8125rem; font-weight: 500; padding: .375rem .625rem; margin: .125rem;
+  }
+</style>
+</head>
+<body>
+
+<h1>Onde está meu pedido?</h1>
+<p class="sub">Informe o e-mail da compra e o número do pedido.</p>
+
+<!-- Só existe no protótipo: diz se a API está no ar antes de você culpar o form. -->
+<p id="estado-api" class="estado">Verificando a API…</p>
+
+<form id="form-rastreio" novalidate>
+  <div>
+    <label for="email">E-mail da compra</label>
+    <input type="email" id="email" name="email" required autocomplete="email"
+           placeholder="voce@exemplo.com">
+  </div>
+  <div>
+    <label for="pedido">Número do pedido</label>
+    <input type="text" id="pedido" name="pedido" required inputmode="numeric"
+           placeholder="59552">
+  </div>
+  <button type="submit" id="enviar">Consultar</button>
+</form>
+
+<!-- aria-live faz o leitor de tela anunciar o resultado sem o usuário
+     precisar procurá-lo na página. -->
+<div id="resultado" aria-live="polite" aria-atomic="true"></div>
+
+<div class="demo">
+  <h2>Cenários de teste (DEMO_MODE)</h2>
+  <p class="sub" style="font-size:.8125rem">
+    Preenchem o formulário com <code>demo@exemplo.com</code>. Clique e consulte.
+  </p>
+  <div id="atalhos"></div>
+</div>
+
+<!-- Script CLÁSSICO, não módulo: `import` é bloqueado quando a página é aberta
+     via file://, e o sintoma é o formulário ficar inerte sem erro visível. -->
+<script src="./rastreio.js"></script>
+<script>
+  const API_BASE = "http://localhost:8000/api/v1";
+  window.RASTREIO_API = API_BASE + "/rastreio";
+
+  const painel = document.getElementById("estado-api");
+
+  window.Rastreio.ligarFormulario({
+    formulario: document.getElementById("form-rastreio"),
+    campoEmail: document.getElementById("email"),
+    campoPedido: document.getElementById("pedido"),
+    resultado: document.getElementById("resultado"),
+    botao: document.getElementById("enviar"),
+  });
+
+  // Diagnóstico: sem isto, uma API desligada parece "o formulário não funciona".
+  fetch(API_BASE + "/demo")
+    .then(function (r) { return r.ok ? r.json() : null; })
+    .then(function (dados) {
+      if (!dados) {
+        painel.textContent =
+          "API respondeu, mas sem DEMO_MODE. Suba com $env:DEMO_MODE=\"true\".";
+        painel.className = "estado estado--alerta";
+        return;
+      }
+      painel.textContent = "API conectada em modo demonstração.";
+      painel.className = "estado estado--ok";
+
+      const caixa = document.getElementById("atalhos");
+      dados.pedidos.forEach(function (pedido) {
+        const b = document.createElement("button");
+        b.type = "button";
+        b.textContent = pedido.numero + " — " + pedido.descricao;
+        b.title = pedido.descricao;
+        b.addEventListener("click", function () {
+          document.getElementById("email").value = dados.email;
+          document.getElementById("pedido").value = pedido.numero;
+          document.getElementById("form-rastreio").requestSubmit();
+        });
+        caixa.append(b);
+      });
+    })
+    .catch(function () {
+      painel.textContent =
+        "API não encontrada em " + API_BASE + ". Suba o servidor antes de consultar.";
+      painel.className = "estado estado--erro";
+    });
+</script>
+
+</body>
+</html>
