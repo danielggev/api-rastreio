@@ -20,9 +20,11 @@
   --rt-branco: #FFFFFF;
 
   background: #f4f4f4;
-  /* Configuraveis pelo editor de temas: menus fixos ou sobrepostos variam de
-     tema para tema, e sem folga o card fica coberto. */
-  padding-block: var(--rt-pad-topo, 88px) var(--rt-pad-base, 56px);
+  /* Configuraveis pelo editor de temas. O padrao e generoso de proposito: o
+     menu deste tema flutua sobre o conteudo, e com pouca folga ele cobre o topo
+     do card. Cada tema posiciona o menu de um jeito, dai o ajuste ficar exposto
+     em vez de fixo no codigo. */
+  padding-block: var(--rt-pad-topo, 144px) var(--rt-pad-base, 96px);
 }
 
 .rastreio__grid {
