@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+from io import StringIO
 from pathlib import Path
 
 import httpx
@@ -11,7 +12,12 @@ import pytest
 import respx
 
 from app.services.frete_rapido import ClienteFreteRapido, FreteRapidoErro
-from app.services.logs import redigir, redigir_excecao
+from app.services.logs import (
+    RedatorDeSegredos,
+    instalar_redacao,
+    redigir,
+    redigir_excecao,
+)
 from app.services.normalizacao import NumeroPedidoFR
 from app.services.reintento import Politica
 
@@ -226,3 +232,64 @@ async def test_token_nunca_aparece_em_log_nem_em_excecao(
 
     assert TOKEN not in str(info.value)
     assert TOKEN not in caplog.text
+
+
+@respx.mock
+async def test_token_nao_vaza_em_consulta_BEM_SUCEDIDA() -> None:
+    """O caso que passou despercebido ate uma revisao externa apontar.
+
+    Testar so o caminho de ERRO dava falsa seguranca: o vazamento acontecia na
+    consulta NORMAL. O httpx registra em INFO a URL completa de toda requisicao
+    -- token da query string incluido -- e isso nao passa por nenhuma excecao
+    nossa.
+
+    Captura direto num handler, e nao pelo `caplog`, porque o filtro de redacao
+    vive nos handlers do logger raiz.
+    """
+    respx.get(URL).mock(
+        return_value=httpx.Response(200, json=_payload("resposta-59552.json"))
+    )
+
+    capturado = StringIO()
+    handler = logging.StreamHandler(capturado)
+    handler.setLevel(logging.DEBUG)
+    raiz = logging.getLogger()
+    raiz.addHandler(handler)
+    nivel_original = raiz.level
+    raiz.setLevel(logging.DEBUG)
+    instalar_redacao()
+
+    try:
+        ocorrencias = await _cliente().buscar_ocorrencias(
+            NumeroPedidoFR("59552", **LOJA), TOKEN
+        )
+    finally:
+        raiz.removeHandler(handler)
+        raiz.setLevel(nivel_original)
+
+    # A consulta funcionou -- nao estamos testando um caminho de erro.
+    assert len(ocorrencias) == 2
+    assert TOKEN not in capturado.getvalue()
+
+
+def test_filtro_redige_qualquer_logger(caplog: pytest.LogCaptureFixture) -> None:
+    """A protecao nao pode depender de eu prever cada biblioteca.
+
+    O filtro fica no HANDLER justamente para pegar registros que sobem de
+    loggers filhos -- um filtro no logger raiz nao os alcancaria.
+    """
+    capturado = StringIO()
+    handler = logging.StreamHandler(capturado)
+    handler.addFilter(RedatorDeSegredos())
+
+    biblioteca = logging.getLogger("biblioteca.qualquer")
+    biblioteca.addHandler(handler)
+    biblioteca.setLevel(logging.INFO)
+    biblioteca.propagate = False
+
+    biblioteca.info("GET %s?token=%s", URL, TOKEN)
+
+    biblioteca.removeHandler(handler)
+    saida = capturado.getvalue()
+    assert TOKEN not in saida
+    assert "token=***" in saida

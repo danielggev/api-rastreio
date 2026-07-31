@@ -139,7 +139,53 @@ class Settings(BaseSettings):
                     f"configuracao obrigatoria ausente: {', '.join(faltando)}"
                 )
 
+        if self.producao:
+            self._exigir_producao()
+
         return self
+
+    def _exigir_producao(self) -> None:
+        """Rejeita configuracao que apenas PARECE preenchida.
+
+        Verificar so se o valor existe nao basta: uma implantacao podia subir com
+        a chave HMAC do arquivo de exemplo, com tokens ficticios de formato
+        plausivel, ou sem CORS -- e a API responderia normalmente, so que
+        insegura ou devolvendo "sem rastreio" para todo mundo.
+        """
+        problemas: list[str] = []
+
+        # Valores que aparecem no .env.example. Se chegaram aqui, ninguem trocou.
+        marcadores = ("xxxx", "yyyy", "zzzz", "troque", "exemplo", "sua-loja",
+                      "COLE_AQUI", "token32caracteres", "tag-empresa-")
+        suspeitos = {
+            "EMAIL_HMAC_KEY": self.email_hmac_key,
+            "SHOPIFY_CLIENT_SECRET": self.shopify_client_secret,
+            "SHOPIFY_SHOP_DOMAIN": self.shopify_shop_domain,
+        }
+        for nome, valor in suspeitos.items():
+            if valor and any(m.lower() in valor.lower() for m in marcadores):
+                problemas.append(f"{nome} ainda contem valor de exemplo")
+
+        for chave, token in self.tokens_frete_rapido.items():
+            if any(m.lower() in token.lower() for m in marcadores):
+                problemas.append(f"token do CNPJ '{chave}' e um valor de exemplo")
+
+        # Chave curta e reversivel por forca bruta: o HMAC deixaria de proteger.
+        if len(self.email_hmac_key) < 32:
+            problemas.append("EMAIL_HMAC_KEY curta demais (minimo 32 caracteres)")
+
+        # Sem CORS em producao, nenhuma pagina de navegador consegue chamar a API.
+        if not self.lista_cors:
+            problemas.append("CORS_ORIGINS vazio")
+
+        # Sem banco nao ha auditoria nem expurgo -- exigencia de LGPD do projeto.
+        if not self.database_url:
+            problemas.append("DATABASE_URL vazia (sem auditoria nem expurgo LGPD)")
+
+        if problemas:
+            raise ValueError(
+                "configuracao invalida para producao: " + "; ".join(problemas)
+            )
 
 
 @lru_cache

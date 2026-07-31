@@ -6,19 +6,22 @@ import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Response
 from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from app.api.v1 import rastreio
 from app.config import Settings, get_settings
 from app.db.session import criar_engine, criar_fabrica
+from app.middleware.protecao import ProtecaoMiddleware
 from app.middleware.rate_limit import LimitadorJanelaDeslizante, interpretar_limite
 from app.services.auditoria import Auditoria
 from app.services.cache import Cache, CacheDesligado, CacheMemoria, CachePostgres
 from app.services.consulta import ServicoConsulta
 from app.services.demo import FreteRapidoDemo, ShopifyDemo, catalogo
 from app.services.frete_rapido import ClienteFreteRapido
+from app.services.logs import instalar_redacao
 from app.services.multi_cnpj import BuscadorMultiCNPJ
 from app.services.shopify import ClienteShopify
 
@@ -26,6 +29,11 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(name)s %(message)s",
 )
+# Instalado IMEDIATAMENTE apos o basicConfig, antes de qualquer requisicao: o
+# httpx registra em INFO a URL completa de cada chamada, com o token da Frete
+# Rapido na query string. Sem isto, uma consulta bem-sucedida grava o segredo.
+instalar_redacao()
+
 logger = logging.getLogger(__name__)
 
 
@@ -70,6 +78,8 @@ async def ciclo_de_vida(app: FastAPI) -> AsyncIterator[None]:
             logger.error("banco indisponivel, seguindo sem auditoria: %s", exc)
 
     app.state.auditoria = Auditoria(fabrica)
+    # Exposta para o readiness consultar as tabelas.
+    app.state.fabrica_sessao = fabrica
 
     limite, janela = interpretar_limite(s.rate_limit)
     app.state.limitador = LimitadorJanelaDeslizante(limite, janela)
@@ -143,11 +153,51 @@ def criar_app() -> FastAPI:
             allow_headers=["Content-Type"],
         )
 
+    # Rate limit e limite de corpo ANTES da validacao do Pydantic. Dentro da
+    # rota, requisicoes malformadas (422) escapavam do limite e corpos enormes
+    # eram lidos e validados antes de qualquer controle.
+    app.add_middleware(
+        ProtecaoMiddleware,
+        proxies_confiaveis=s.lista_proxies,
+    )
+
     app.include_router(rastreio.router)
 
     @app.get("/health", include_in_schema=False)
     async def health() -> dict[str, str]:
+        """Liveness: o processo esta de pe e respondendo."""
         return {"status": "ok"}
+
+    @app.get("/health/ready", include_in_schema=False)
+    async def readiness(resposta: Response) -> dict[str, object]:
+        """Readiness: as dependencias estao utilizaveis?
+
+        `/health` responder ok nao significa que o servico esta inteiro -- a API
+        continua atendendo com o banco fora, so que sem auditoria e sem cache.
+        Sem esta rota, um deploy que esquecesse `alembic upgrade head` passaria
+        despercebido pelo monitoramento por tempo indeterminado.
+        """
+        detalhes: dict[str, object] = {"api": "ok"}
+        pronto = True
+
+        fabrica = getattr(app.state, "fabrica_sessao", None)
+        if fabrica is None:
+            detalhes["banco"] = "nao configurado"
+        else:
+            try:
+                async with fabrica() as sessao_teste:
+                    # Consulta a tabela real: conexao viva nao garante que as
+                    # migrations rodaram.
+                    await sessao_teste.execute(text("SELECT 1 FROM consulta_log LIMIT 1"))
+                detalhes["banco"] = "ok"
+            except Exception as exc:
+                detalhes["banco"] = f"indisponivel: {type(exc).__name__}"
+                pronto = False
+
+        detalhes["pronto"] = pronto
+        if not pronto:
+            resposta.status_code = 503
+        return detalhes
 
     if s.demo_mode:
 

@@ -27,6 +27,9 @@ logger = logging.getLogger(__name__)
 
 _CAMINHO = "/api/external/embarcador/v1/quotes/{numero}/occurrences"
 
+# Um frete real tem dezenas de ocorrencias, nao milhares.
+MAX_OCORRENCIAS = 200
+
 
 class FreteRapidoErro(Exception):
     """Falha ao consultar a Frete Rapido."""
@@ -61,8 +64,8 @@ class ClienteFreteRapido:
 
         url = f"{self._base_url}{_CAMINHO.format(numero=numero)}"
 
-        async def chamar() -> list[OcorrenciaFR]:
-            return await self._executar(url, numero, token)
+        async def chamar(timeout: float) -> list[OcorrenciaFR]:
+            return await self._executar(url, numero, token, timeout)
 
         try:
             return await com_reintento(
@@ -90,14 +93,14 @@ class ClienteFreteRapido:
             )
 
     async def _executar(
-        self, url: str, numero: str, token: str
+        self, url: str, numero: str, token: str, timeout: float
     ) -> list[OcorrenciaFR]:
         params = {"token": token}
         try:
             if self._http is not None:
-                resposta = await self._http.get(url, params=params, timeout=10.0)
+                resposta = await self._http.get(url, params=params, timeout=timeout)
             else:
-                async with httpx.AsyncClient(timeout=10.0) as http:
+                async with httpx.AsyncClient(timeout=timeout) as http:
                     resposta = await http.get(url, params=params)
         except (httpx.TimeoutException, httpx.ConnectError, httpx.ReadError) as exc:
             raise Transitorio(redigir_excecao(exc)) from None
@@ -130,6 +133,18 @@ class ClienteFreteRapido:
                 f"resposta da Frete Rapido nao e uma lista: {type(dados).__name__}"
             )
 
+        # Teto na quantidade: um frete real tem dezenas de ocorrencias. Milhares
+        # indicam erro do fornecedor ou payload hostil, e carregar tudo incharia
+        # cache, logs e o DOM da pagina.
+        if len(dados) > MAX_OCORRENCIAS:
+            logger.warning(
+                "pedido %s veio com %d ocorrencias; truncado em %d",
+                numero,
+                len(dados),
+                MAX_OCORRENCIAS,
+            )
+            dados = dados[:MAX_OCORRENCIAS]
+
         ocorrencias: list[OcorrenciaFR] = []
         for bruta in dados:
             try:
@@ -142,5 +157,15 @@ class ClienteFreteRapido:
                 logger.warning(
                     "ocorrencia ignorada no pedido %s: %s", numero, redigir(str(exc))
                 )
+
+        # Se a API devolveu itens e NENHUM foi aproveitado, o formato mudou.
+        # Tratar como lista vazia diria ao cliente "pedido em separacao" -- uma
+        # mentira tranquilizadora que esconderia a quebra da integracao ate
+        # alguem reclamar. Melhor falhar alto.
+        if dados and not ocorrencias:
+            raise Permanente(
+                f"pedido {numero}: {len(dados)} ocorrencia(s) recebidas e nenhuma "
+                "reconhecida -- o formato da Frete Rapido pode ter mudado"
+            )
 
         return indexar(ocorrencias)

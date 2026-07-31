@@ -10,6 +10,7 @@ Toda URL e mensagem de erro passa por aqui antes de ser registrada.
 
 from __future__ import annotations
 
+import logging
 import re
 
 _PADROES: tuple[re.Pattern[str], ...] = (
@@ -42,3 +43,44 @@ def redigir_excecao(exc: BaseException) -> str:
     mensagem original pode carregar a URL completa com o token.
     """
     return f"{type(exc).__name__}: {redigir(str(exc))}"
+
+
+class RedatorDeSegredos(logging.Filter):
+    """Redige QUALQUER registro que chegue ao handler, venha de onde vier.
+
+    Existe porque redigir apenas o que nos escrevemos nao basta: o proprio httpx
+    registra em INFO a URL completa de cada requisicao, token da query string
+    incluido. Uma consulta comum, bem-sucedida, gravava o segredo no log.
+
+    O filtro fica no HANDLER, nao no logger: filtro em logger so vale para
+    registros criados nele, e nao para os que sobem de loggers filhos como
+    `httpx`. No handler, tudo passa por aqui.
+
+    Assim qualquer biblioteca futura que faca o mesmo ja nasce coberta.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        try:
+            mensagem = record.getMessage()
+        except Exception:
+            return True
+
+        limpo = redigir(mensagem)
+        if limpo != mensagem:
+            record.msg = limpo
+            record.args = ()
+        return True
+
+
+def instalar_redacao(logger_raiz: logging.Logger | None = None) -> None:
+    """Instala o filtro em todos os handlers do logger raiz."""
+    raiz = logger_raiz or logging.getLogger()
+    for handler in raiz.handlers:
+        if not any(isinstance(f, RedatorDeSegredos) for f in handler.filters):
+            handler.addFilter(RedatorDeSegredos())
+
+    # Cinto e suspensorio: sem o INFO do httpx, some a principal fonte do
+    # problema mesmo que o filtro falhe. As falhas de rede continuam visiveis,
+    # porque WARNING e acima seguem passando.
+    for nome in ("httpx", "httpcore"):
+        logging.getLogger(nome).setLevel(logging.WARNING)

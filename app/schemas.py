@@ -16,6 +16,10 @@ from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
 
+# Teto para textos vindos de terceiros (transportadoras). Aplicado ja no
+# parsing, antes de chegar ao cache, aos logs ou a pagina.
+MAX_TEXTO_EXTERNO = 1000
+
 
 class Grupo(StrEnum):
     """Agrupamento visual de um codigo de ocorrencia.
@@ -93,6 +97,26 @@ class OcorrenciaFR(BaseModel):
     # Preenchido na leitura, nao vem da API: e o desempate da ordenacao quando
     # duas ocorrencias tem o mesmo instante.
     indice_origem: int = 0
+
+    @field_validator(
+        "nome",
+        "descricao_ocorrencia",
+        "mensagem",
+        "razao_social_transportadora",
+        "codigo_volume",
+        mode="before",
+    )
+    @classmethod
+    def _limitar_texto_externo(cls, v: Any) -> Any:
+        """Corta textos vindos de terceiros.
+
+        `nome`, `mensagem` e afins sao preenchidos por transportadoras. Sem
+        teto, um valor gigante -- por erro ou por ma-fe do fornecedor -- incharia
+        o cache, os logs e o DOM da pagina do cliente.
+        """
+        if isinstance(v, str) and len(v) > MAX_TEXTO_EXTERNO:
+            return v[:MAX_TEXTO_EXTERNO]
+        return v
 
     @field_validator("codigo", mode="before")
     @classmethod

@@ -148,8 +148,8 @@ class GerenciadorTokenShopify:
         return self._token is not None and time.monotonic() < self._expira_em
 
     async def _renovar(self) -> str:
-        async def chamar() -> dict[str, Any]:
-            return await self._trocar_credenciais()
+        async def chamar(timeout: float) -> dict[str, Any]:
+            return await self._trocar_credenciais(timeout)
 
         try:
             corpo = await com_reintento(
@@ -177,7 +177,7 @@ class GerenciadorTokenShopify:
         )
         return token
 
-    async def _trocar_credenciais(self) -> dict[str, Any]:
+    async def _trocar_credenciais(self, timeout: float) -> dict[str, Any]:
         dados = {
             "grant_type": "client_credentials",
             "client_id": self._client_id,
@@ -186,9 +186,9 @@ class GerenciadorTokenShopify:
 
         try:
             if self._http is not None:
-                resposta = await self._http.post(self.url, data=dados, timeout=10.0)
+                resposta = await self._http.post(self.url, data=dados, timeout=timeout)
             else:
-                async with httpx.AsyncClient(timeout=10.0) as http:
+                async with httpx.AsyncClient(timeout=timeout) as http:
                     resposta = await http.post(self.url, data=dados)
         except (httpx.TimeoutException, httpx.ConnectError, httpx.ReadError) as exc:
             raise Transitorio(redigir_excecao(exc)) from None

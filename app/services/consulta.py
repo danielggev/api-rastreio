@@ -172,20 +172,24 @@ class ServicoConsulta:
                 )
                 return _erro_externo()
 
-            await self._cache.guardar(numero_confirmado, ocorrencias)
+            await self._cache.guardar(numero_confirmado, ocorrencias, cnpj)
         else:
             veio_do_cache = True
-
-        # O codigo de rastreio NUNCA vem do cache: a Shopify e consultada em toda
-        # requisicao de qualquer forma, entao usamos sempre o dado fresco.
-        codigo_rastreio = pedido.codigo_rastreio
+            # Sem isto o log de um acerto de cache sairia sem CNPJ, e perderiamos
+            # a informacao de qual empresa atendeu aquele pedido.
+            cnpj = await self._cache.cnpj_de(numero_confirmado)
 
         if not ocorrencias:
-            if pedido.tem_fulfillment and codigo_rastreio:
+            # Basta HAVER fulfillment: o pedido foi despachado, tendo codigo de
+            # rastreio ou nao. Exigir o codigo (que nem exibimos mais) fazia um
+            # pedido ja enviado aparecer como "em separacao" -- informacao
+            # errada para quem esta esperando a encomenda.
+            if pedido.tem_fulfillment:
                 # Anomalia: ha despacho na Shopify mas a Frete Rapido nao conhece
                 # o pedido. Alertado por TAXA, nunca por evento isolado.
                 logger.warning(
-                    "vazio_fr no pedido %s (ha fulfillment com rastreio)",
+                    "vazio_fr no pedido %s: ha fulfillment na Shopify, mas a "
+                    "Frete Rapido nao devolveu ocorrencias",
                     numero_confirmado,
                 )
                 return Consulta(

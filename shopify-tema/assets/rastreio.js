@@ -13,6 +13,10 @@
 (function () {
   'use strict';
 
+  /* Teto de espera. A API tem orcamento proprio de ~8s; 20s aqui cobre a
+     latencia da rede do cliente com folga, sem deixar a tela travada. */
+  var TIMEOUT_MS = 20000;
+
   /* Grupos em que o cliente precisa AGIR -- e onde esta pagina de fato evita
      um contato no suporte, entao recebem peso visual maior. */
   var EXIGEM_ACAO = ['aguardando_retirada', 'tentativa_falha'];
@@ -209,9 +213,20 @@
         el('p', 'rastreio-resultado__carregando', 'Procurando seu pedido...')
       );
 
+      /* Sem teto de tempo, uma rede ruim deixaria "Procurando seu pedido..."
+         na tela indefinidamente -- pior que um erro, porque o cliente nao sabe
+         se deve esperar ou desistir. */
+      var controle = new AbortController();
+      var expirou = false;
+      var relogio = setTimeout(function () {
+        expirou = true;
+        controle.abort();
+      }, TIMEOUT_MS);
+
       fetch(api, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
+        signal: controle.signal,
         body: JSON.stringify({
           email: form.email.value.trim(),
           /* O "#" e tolerado pela API, mas limpar aqui evita ida e volta. */
@@ -225,10 +240,13 @@
         })
         .catch(function () {
           alvo.replaceChildren(montarMensagem({
-            mensagem: 'Nao conseguimos conectar. Verifique sua internet e tente de novo.'
+            mensagem: expirou
+              ? 'A consulta demorou mais que o esperado. Tente novamente em instantes.'
+              : 'Nao conseguimos conectar. Verifique sua internet e tente de novo.'
           }, 'erro'));
         })
         .then(function () {
+          clearTimeout(relogio);
           emAndamento = false;
           if (botao) botao.disabled = false;
           /* No celular o resultado nasce fora da tela: sem isto o cliente

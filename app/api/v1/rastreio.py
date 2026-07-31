@@ -10,7 +10,6 @@ from fastapi.responses import JSONResponse
 
 from app.config import Settings, get_settings
 from app.middleware.ip_cliente import ip_do_cliente
-from app.middleware.rate_limit import LimitadorJanelaDeslizante
 from app.schemas import ConsultaRequest
 from app.services.auditoria import Auditoria
 from app.services.consulta import ServicoConsulta
@@ -24,19 +23,10 @@ CABECALHOS_SEM_CACHE = {
     "Pragma": "no-cache",
 }
 
-MSG_LIMITE = (
-    "Muitas consultas em pouco tempo. Aguarde um minuto e tente novamente."
-)
-
 
 def obter_servico(request: Request) -> ServicoConsulta:
     servico: ServicoConsulta = request.app.state.servico_consulta
     return servico
-
-
-def obter_limitador(request: Request) -> LimitadorJanelaDeslizante:
-    limitador: LimitadorJanelaDeslizante = request.app.state.limitador
-    return limitador
 
 
 def obter_auditoria(request: Request) -> Auditoria:
@@ -57,18 +47,13 @@ async def consultar_rastreio(
     dados: ConsultaRequest,
     request: Request,
     servico: Annotated[ServicoConsulta, Depends(obter_servico)],
-    limitador: Annotated[LimitadorJanelaDeslizante, Depends(obter_limitador)],
     auditoria: Annotated[Auditoria, Depends(obter_auditoria)],
     s: Annotated[Settings, Depends(get_settings)],
 ) -> JSONResponse:
-    # 1. Rate limit, com o IP REAL do cliente (ver ip_cliente.py).
+    # O rate limit e o limite de corpo rodam no MIDDLEWARE, antes da validacao
+    # do Pydantic. Aqui dentro, requisicoes malformadas ja teriam escapado do
+    # limite -- o FastAPI rejeita com 422 antes de chegar nesta funcao.
     ip = ip_do_cliente(request, s.lista_proxies)
-    if not limitador.permitir(ip):
-        return JSONResponse(
-            status_code=429,
-            content={"resultado": "limite_excedido", "mensagem": MSG_LIMITE},
-            headers={**CABECALHOS_SEM_CACHE, "Retry-After": "60"},
-        )
 
     inicio = time.monotonic()
     consulta = await servico.consultar(dados.email, dados.numero_pedido)

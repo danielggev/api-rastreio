@@ -23,6 +23,18 @@ class Politica:
     max_tentativas: int = 3  # 1 chamada + 2 reintentos
     orcamento_s: float = 8.0
     base_espera_s: float = 0.3
+    # Teto de CADA chamada. Sem isto o orcamento total nao se sustenta: contar
+    # apenas a espera entre tentativas permitia que uma unica chamada travasse
+    # por 10s e estourasse sozinha o limite.
+    timeout_chamada_s: float = 6.0
+
+    def restante(self, decorrido: float) -> float:
+        """Quanto tempo a proxima chamada ainda pode consumir."""
+        return max(self.orcamento_s - decorrido, 0.0)
+
+    def timeout_para(self, decorrido: float) -> float:
+        """Timeout da proxima chamada, limitado pelo que sobra do orcamento."""
+        return max(min(self.timeout_chamada_s, self.restante(decorrido)), 0.5)
 
 
 class Transitorio(Exception):
@@ -34,18 +46,27 @@ class Permanente(Exception):
 
 
 async def com_reintento[T](
-    operacao: Callable[[], Awaitable[T]],
+    operacao: Callable[[float], Awaitable[T]],
     politica: Politica | None = None,
     *,
     nome: str = "chamada externa",
 ) -> T:
+    """Executa `operacao(timeout)` com reintento dentro de um orcamento total.
+
+    A operacao RECEBE o timeout que pode gastar. E o que faz o orcamento valer
+    de verdade: sem passar esse limite adiante, cada chamada usaria o proprio
+    timeout e o total viraria a soma deles.
+    """
     pol = politica or Politica()
     inicio = time.monotonic()
     ultima: Exception | None = None
 
     for tentativa in range(1, pol.max_tentativas + 1):
+        decorrido = time.monotonic() - inicio
+        if decorrido >= pol.orcamento_s and ultima is not None:
+            break
         try:
-            return await operacao()
+            return await operacao(pol.timeout_para(decorrido))
         except Permanente:
             raise
         except Transitorio as exc:

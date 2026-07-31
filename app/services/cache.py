@@ -37,7 +37,11 @@ TTL_PADRAO_S = 15 * 60
 class Cache(Protocol):
     async def obter(self, chave: str) -> list[OcorrenciaFR] | None: ...
 
-    async def guardar(self, chave: str, ocorrencias: list[OcorrenciaFR]) -> None: ...
+    async def guardar(
+        self, chave: str, ocorrencias: list[OcorrenciaFR], cnpj: str | None = None
+    ) -> None: ...
+
+    async def cnpj_de(self, chave: str) -> str | None: ...
 
 
 class CacheMemoria:
@@ -46,6 +50,7 @@ class CacheMemoria:
     def __init__(self, ttl_s: int = TTL_PADRAO_S) -> None:
         self._ttl = ttl_s
         self._dados: dict[str, tuple[float, list[OcorrenciaFR]]] = {}
+        self._cnpjs: dict[str, str] = {}
 
     async def obter(self, chave: str) -> list[OcorrenciaFR] | None:
         item = self._dados.get(chave)
@@ -59,17 +64,29 @@ class CacheMemoria:
             return None
         return ocorrencias
 
-    async def guardar(self, chave: str, ocorrencias: list[OcorrenciaFR]) -> None:
+    async def guardar(
+        self, chave: str, ocorrencias: list[OcorrenciaFR], cnpj: str | None = None
+    ) -> None:
         if not ocorrencias:
             return
         self._dados[chave] = (time.monotonic(), ocorrencias)
+        if cnpj:
+            self._cnpjs[chave] = cnpj
+
+    async def cnpj_de(self, chave: str) -> str | None:
+        return self._cnpjs.get(chave)
 
 
 class CacheDesligado:
     async def obter(self, chave: str) -> list[OcorrenciaFR] | None:
         return None
 
-    async def guardar(self, chave: str, ocorrencias: list[OcorrenciaFR]) -> None:
+    async def guardar(
+        self, chave: str, ocorrencias: list[OcorrenciaFR], cnpj: str | None = None
+    ) -> None:
+        return None
+
+    async def cnpj_de(self, chave: str) -> str | None:
         return None
 
 
@@ -112,7 +129,9 @@ class CachePostgres:
             logger.warning("falha ao ler o cache: %s", exc)
             return None
 
-    async def guardar(self, chave: str, ocorrencias: list[OcorrenciaFR]) -> None:
+    async def guardar(
+        self, chave: str, ocorrencias: list[OcorrenciaFR], cnpj: str | None = None
+    ) -> None:
         if not ocorrencias:
             return
         try:
@@ -124,14 +143,29 @@ class CachePostgres:
                         RastreioCache(
                             numero_pedido=chave,
                             ocorrencias=dados,
+                            # Guardado para auditoria: sem isto, um acerto de
+                            # cache aparece no log sem CNPJ, e some a informacao
+                            # de qual empresa atendeu aquele pedido.
+                            cnpj=cnpj,
                             atualizado_em=datetime.now(UTC),
                         )
                     )
                 else:
                     registro.ocorrencias = dados
+                    if cnpj:
+                        registro.cnpj = cnpj
                     registro.atualizado_em = datetime.now(UTC)
         except Exception as exc:
             logger.warning("falha ao gravar no cache: %s", exc)
+
+    async def cnpj_de(self, chave: str) -> str | None:
+        """CNPJ que atendeu este pedido, para o log de um acerto de cache."""
+        try:
+            async with sessao(self._fabrica) as sess:
+                registro = await sess.get(RastreioCache, chave)
+                return registro.cnpj if registro else None
+        except Exception:
+            return None
 
     async def expurgar(self) -> int:
         """Remove registros vencidos. Roda junto com o expurgo do log."""

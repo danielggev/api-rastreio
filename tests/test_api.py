@@ -226,6 +226,68 @@ def test_resposta_bloqueada_nao_revela_se_o_pedido_existe() -> None:
     assert a.json() == b.json()
 
 
+def test_requisicao_malformada_TAMBEM_consome_o_limite() -> None:
+    """Brecha apontada em revisao externa.
+
+    Com o rate limit dentro da rota, o FastAPI rejeitava o corpo invalido com
+    422 ANTES de chegar la -- dava para martelar a API indefinidamente desde
+    que o JSON fosse invalido. No middleware, o limite vale para tudo.
+    """
+    with _cliente(_pedido(), _ocorrencias()) as c:
+        c.app.state.limitador = LimitadorJanelaDeslizante(limite=3, janela_s=60)  # type: ignore[attr-defined]
+        invalido = {"email": "nao-e-email", "numero_pedido": ""}
+
+        codigos = [
+            c.post("/api/v1/rastreio", json=invalido).status_code for _ in range(5)
+        ]
+
+    # As tres primeiras sao rejeitadas pela validacao; as seguintes, pelo limite.
+    assert codigos[:3] == [422, 422, 422]
+    assert codigos[3:] == [429, 429]
+
+
+def test_corpo_gigante_e_recusado_antes_de_ser_lido() -> None:
+    """Sem teto, o Pydantic carregaria e validaria megabytes de graca."""
+    with _cliente(_pedido(), _ocorrencias()) as c:
+        gigante = {"email": EMAIL, "numero_pedido": "9" * (16 * 1024)}
+        resposta = c.post("/api/v1/rastreio", json=gigante)
+
+    assert resposta.status_code == 413
+    assert resposta.headers["cache-control"] == "no-store"
+
+
+def test_health_nao_e_bloqueado_pelo_limite() -> None:
+    """Monitoramento nao pode ser barrado por rate limit."""
+    with _cliente(_pedido(), _ocorrencias()) as c:
+        c.app.state.limitador = LimitadorJanelaDeslizante(limite=0, janela_s=60)  # type: ignore[attr-defined]
+        assert c.get("/health").status_code == 200
+
+
+def test_readiness_acusa_banco_indisponivel() -> None:
+    """`/health` responder ok nao significa que o servico esta inteiro.
+
+    A API continua atendendo com o banco fora -- so que sem auditoria e sem
+    cache. Sem o readiness, um deploy que esquecesse `alembic upgrade head`
+    passaria despercebido pelo monitoramento por tempo indeterminado.
+
+    Nos testes nao ha Postgres no ar, entao esta rota deve acusar o problema --
+    e e exatamente esse o comportamento que queremos em producao.
+    """
+    with _cliente(_pedido(), _ocorrencias()) as c:
+        vivo = c.get("/health")
+        pronto = c.get("/health/ready")
+
+    # Liveness continua ok: o processo esta de pe.
+    assert vivo.status_code == 200
+
+    # Readiness acusa: o servico nao esta inteiro.
+    assert pronto.status_code == 503
+    corpo = pronto.json()
+    assert corpo["api"] == "ok"
+    assert corpo["pronto"] is False
+    assert corpo["banco"] != "ok"
+
+
 def test_health() -> None:
     with _cliente(_pedido(), _ocorrencias()) as c:
         assert c.get("/health").json() == {"status": "ok"}

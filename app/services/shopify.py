@@ -147,8 +147,8 @@ class ClienteShopify:
             "primeiros": TAMANHO_PAGINA,
         }
 
-        async def chamar() -> dict[str, Any]:
-            return await self._executar(variaveis)
+        async def chamar(timeout: float) -> dict[str, Any]:
+            return await self._executar(variaveis, timeout)
 
         try:
             corpo = await com_reintento(chamar, self._politica, nome="Shopify orders")
@@ -159,7 +159,9 @@ class ClienteShopify:
 
         return self._selecionar(corpo, numero)
 
-    async def _executar(self, variaveis: dict[str, Any]) -> dict[str, Any]:
+    async def _executar(
+        self, variaveis: dict[str, Any], timeout: float
+    ) -> dict[str, Any]:
         try:
             token = await self._auth.obter()
         except ShopifyAutenticacaoErro as exc:
@@ -176,10 +178,10 @@ class ClienteShopify:
         try:
             if self._http is not None:
                 resposta = await self._http.post(
-                    self.url, json=corpo_req, headers=cabecalhos, timeout=10.0
+                    self.url, json=corpo_req, headers=cabecalhos, timeout=timeout
                 )
             else:
-                async with httpx.AsyncClient(timeout=10.0) as http:
+                async with httpx.AsyncClient(timeout=timeout) as http:
                     resposta = await http.post(
                         self.url, json=corpo_req, headers=cabecalhos
                     )
