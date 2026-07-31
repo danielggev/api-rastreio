@@ -1,0 +1,20 @@
+{
+  "sections": {
+    "main": {
+      "type": "rastreio",
+      "settings": {
+        "api_url": "https://rastreio.srv1835728.hstgr.cloud/api/v1/rastreio",
+        "titulo": "Rastreie seu pedido",
+        "titulo_destaque": "rapidamente",
+        "subtitulo": "Preencha as informações que fazemos o resto pra você",
+        "placeholder_email": "E-mail",
+        "placeholder_pedido": "Número do pedido",
+        "texto_botao": "Rastrear meu pedido",
+        "nota_privacidade": "Seus dados são utilizados apenas para localizar seu pedido.",
+        "rodape": "<p>Não lembra o número? Procure em <a href=\"/account\">Minha conta</a></p>",
+        "cor_fundo": "#f4f4f4"
+      }
+    }
+  },
+  "order": ["main"]
+}

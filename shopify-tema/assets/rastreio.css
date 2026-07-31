@@ -1,0 +1,391 @@
+/* ============================================
+   GRUDADO EM VOCE - Rastreio de pedido
+   Estilos da secao de rastreio.
+
+   AUTOSSUFICIENTE de proposito: cada cor usa a variavel do tema quando ela
+   existe e a cor da marca como fallback -- `var(--color-navy, #253746)`.
+   Assim a secao funciona em qualquer tema, e herda a paleta quando houver.
+   ============================================ */
+
+.rastreio {
+  /* Paleta oficial da marca */
+  --rt-amarelo: #F9E547;
+  --rt-verde: #8EDD65;
+  --rt-rosa: #EF426F;
+  --rt-azul: #05C3DE;
+  --rt-laranja: #FF6A39;
+  --rt-navy: var(--color-navy, #253746);
+  --rt-cinza: var(--color-gray-600, #6C757D);
+  --rt-borda: var(--color-gray-200, #E2E6EA);
+  --rt-branco: #FFFFFF;
+
+  background: #f4f4f4;
+  padding-block: 3rem 2.5rem;
+}
+
+.rastreio__grid {
+  max-width: 1200px;
+  margin-inline: auto;
+  padding-inline: 1.5rem;
+  display: grid;
+  grid-template-columns: 0.9fr 1.1fr;
+  gap: 3rem;
+  align-items: center;
+}
+
+.rastreio__media img {
+  width: 100%;
+  height: auto;
+  display: block;
+  border-radius: 16px;
+}
+
+.rastreio__card {
+  background: var(--rt-branco);
+  border-radius: 16px;
+  box-shadow: 0 8px 24px rgba(37, 55, 70, 0.12);
+  padding: 3rem;
+  display: flex;
+  flex-direction: column;
+  gap: 1.5rem;
+}
+
+.rastreio__titulo {
+  font-size: clamp(1.625rem, 2.6vw, 2.125rem);
+  color: var(--rt-navy);
+  line-height: 1.15;
+  text-align: center;
+  margin: 0;
+}
+.rastreio__titulo span { display: block; color: var(--rt-azul); }
+
+.rastreio__subtitulo {
+  color: var(--rt-cinza);
+  font-size: 0.95rem;
+  text-align: center;
+  margin: -0.75rem 0 0;
+}
+
+/* ── Formulario ── */
+
+.rastreio__form {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  margin: 0;
+}
+
+.rastreio__form input {
+  width: 100%;
+  padding: 0.9rem 1.1rem;
+  border: 2px solid var(--rt-borda);
+  border-radius: 12px;
+  font-family: inherit;
+  font-size: 0.95rem;
+  color: var(--rt-navy);
+  background: var(--rt-branco);
+  transition: border-color 250ms ease;
+}
+.rastreio__form input::placeholder { color: var(--color-gray-400, #ADB5BD); }
+.rastreio__form input:focus { outline: none; border-color: var(--rt-azul); }
+
+.rastreio__submit {
+  width: 100%;
+  padding: 1rem 1.5rem;
+  background: var(--rt-azul);
+  color: var(--rt-navy);
+  border: none;
+  border-radius: 999px;
+  font-family: inherit;
+  font-weight: 900;
+  font-size: 1rem;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  transition: filter 200ms, transform 150ms, box-shadow 200ms;
+}
+.rastreio__submit svg { width: 20px; height: 20px; flex-shrink: 0; }
+.rastreio__submit:hover {
+  filter: brightness(1.08);
+  transform: translateY(-1px);
+  box-shadow: 0 8px 20px rgba(5, 195, 222, 0.35);
+}
+.rastreio__submit:active { transform: none; box-shadow: none; }
+.rastreio__submit[disabled] { opacity: 0.65; cursor: progress; transform: none; }
+
+.rastreio__nota,
+.rastreio__rodape {
+  font-size: 0.8rem;
+  color: var(--rt-cinza);
+  text-align: center;
+  margin: 0;
+}
+.rastreio__nota {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.35rem;
+}
+.rastreio__nota svg { width: 14px; height: 14px; flex-shrink: 0; }
+.rastreio__rodape a {
+  color: var(--rt-navy);
+  font-weight: 700;
+  text-decoration: underline;
+}
+
+.rastreio__visually-hidden {
+  position: absolute;
+  width: 1px; height: 1px;
+  padding: 0; margin: -1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* ============================================
+   RESULTADO
+
+   A cor vem do GRUPO, nunca do codigo da ocorrencia: sao 250+ codigos
+   possiveis contra 13 grupos. E o que permite tratar o catalogo inteiro com um
+   punhado de tratamentos visuais -- e faz um codigo novo cair no neutro em vez
+   de quebrar o layout.
+   ============================================ */
+
+.rastreio-resultado {
+  --rt-cor: var(--rt-cinza);
+  --rt-tint: #f4f6f7;
+
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  padding-top: 1.5rem;
+  border-top: 1px solid var(--rt-borda);
+  text-align: left;
+  animation: rastreio-surge 300ms ease both;
+}
+
+@keyframes rastreio-surge {
+  from { opacity: 0; transform: translateY(6px); }
+  to   { opacity: 1; transform: none; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .rastreio-resultado { animation: none; }
+}
+
+.rastreio-resultado__pedido {
+  font-size: 0.8rem;
+  color: var(--rt-cinza);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  margin: 0;
+}
+
+.rastreio-resultado__mensagem {
+  font-size: 0.95rem;
+  color: var(--rt-navy);
+  margin: 0;
+  line-height: 1.5;
+}
+
+.rastreio-resultado__carregando {
+  font-size: 0.95rem;
+  color: var(--rt-cinza);
+  margin: 0;
+  padding-top: 1.5rem;
+  border-top: 1px solid var(--rt-borda);
+}
+
+/* ── Status atual ── */
+
+.rastreio-resultado__status {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  padding: 1rem 1.25rem;
+  border-radius: 12px;
+  background: var(--rt-tint);
+  border-left: 5px solid var(--rt-cor);
+}
+
+.rastreio-resultado__status-rotulo {
+  font-weight: 900;
+  font-size: 1.15rem;
+  color: var(--rt-navy);
+  line-height: 1.2;
+}
+
+.rastreio-resultado__status-data {
+  font-size: 0.8rem;
+  color: var(--rt-cinza);
+}
+
+.rastreio-resultado__status--coletado,
+.rastreio-resultado__status--em_transito {
+  --rt-cor: var(--rt-azul);
+  --rt-tint: rgba(5, 195, 222, 0.10);
+}
+.rastreio-resultado__status--saiu_para_entrega,
+.rastreio-resultado__status--entregue {
+  --rt-cor: var(--rt-verde);
+  --rt-tint: rgba(142, 221, 101, 0.10);
+}
+/* Laranja para o que EXIGE ACAO: precisa saltar mais que o azul do transito. */
+.rastreio-resultado__status--aguardando_retirada,
+.rastreio-resultado__status--tentativa_falha {
+  --rt-cor: var(--rt-laranja);
+  --rt-tint: rgba(255, 106, 57, 0.10);
+}
+.rastreio-resultado__status--entrega_parcial,
+.rastreio-resultado__status--problema {
+  --rt-cor: var(--rt-amarelo);
+  --rt-tint: rgba(249, 229, 71, 0.10);
+}
+.rastreio-resultado__status--devolucao,
+.rastreio-resultado__status--sinistro,
+.rastreio-resultado__status--cancelado {
+  --rt-cor: var(--rt-rosa);
+  --rt-tint: rgba(239, 66, 111, 0.10);
+}
+
+/* ── Avisos ── */
+
+.rastreio-resultado__aviso {
+  margin: 0;
+  padding: 0.85rem 1rem;
+  border-radius: 12px;
+  background: #f4f6f7;
+  font-size: 0.9rem;
+  line-height: 1.5;
+  color: var(--rt-navy);
+}
+.rastreio-resultado__aviso--acao {
+  background: rgba(255, 106, 57, 0.10);
+  border: 1.5px solid var(--rt-laranja);
+  font-weight: 600;
+}
+.rastreio-resultado__aviso--atraso {
+  background: rgba(239, 66, 111, 0.10);
+  border: 1.5px solid var(--rt-rosa);
+}
+
+/* ── Transportadora e previsao ── */
+
+.rastreio-resultado__infos {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+.rastreio-resultado__info {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 1rem;
+  font-size: 0.9rem;
+}
+.rastreio-resultado__info-rotulo { color: var(--rt-cinza); }
+.rastreio-resultado__info-valor {
+  font-weight: 700;
+  color: var(--rt-navy);
+  text-align: right;
+}
+
+/* ── Linha do tempo ── */
+
+.rastreio-resultado__historico-titulo {
+  font-weight: 900;
+  font-size: 1rem;
+  color: var(--rt-navy);
+  margin: 0.5rem 0 0;
+}
+
+.rastreio-resultado__historico {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.rastreio-resultado__evento {
+  --rt-cor: var(--color-gray-400, #ADB5BD);
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  padding-left: 1.5rem;
+}
+
+/* Trilho continuo ligando os pontos da linha do tempo. */
+.rastreio-resultado__evento::before {
+  content: '';
+  position: absolute;
+  left: 4px;
+  top: 0.45rem;
+  bottom: -1rem;
+  width: 2px;
+  background: var(--rt-borda);
+}
+.rastreio-resultado__evento:last-child::before { display: none; }
+
+.rastreio-resultado__evento::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 0.3rem;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--rt-cor);
+}
+/* O evento mais recente e o de cima: recebe o ponto maior. */
+.rastreio-resultado__evento:first-child::after {
+  width: 12px; height: 12px; left: -1px; top: 0.25rem;
+}
+
+.rastreio-resultado__evento--coletado,
+.rastreio-resultado__evento--em_transito       { --rt-cor: var(--rt-azul); }
+.rastreio-resultado__evento--saiu_para_entrega,
+.rastreio-resultado__evento--entregue          { --rt-cor: var(--rt-verde); }
+.rastreio-resultado__evento--aguardando_retirada,
+.rastreio-resultado__evento--tentativa_falha   { --rt-cor: var(--rt-laranja); }
+.rastreio-resultado__evento--entrega_parcial,
+.rastreio-resultado__evento--problema          { --rt-cor: var(--rt-amarelo); }
+.rastreio-resultado__evento--devolucao,
+.rastreio-resultado__evento--sinistro,
+.rastreio-resultado__evento--cancelado         { --rt-cor: var(--rt-rosa); }
+
+.rastreio-resultado__evento-rotulo {
+  font-weight: 700;
+  font-size: 0.9rem;
+  color: var(--rt-navy);
+}
+.rastreio-resultado__evento-data,
+.rastreio-resultado__evento-descricao {
+  font-size: 0.78rem;
+  color: var(--rt-cinza);
+}
+
+/* ── Responsivo ── */
+
+@media (max-width: 1024px) {
+  .rastreio__grid { grid-template-columns: 1fr; gap: 2rem; }
+  .rastreio__media { max-width: 480px; margin-inline: auto; }
+  .rastreio__card { max-width: 480px; margin-inline: auto; }
+}
+
+@media (max-width: 768px) {
+  .rastreio { padding-block: 2rem 1.5rem; }
+  .rastreio__card { padding: 2rem 1.5rem; }
+}
+
+@media (max-width: 480px) {
+  .rastreio__card { padding: 1.75rem 1.25rem; gap: 1.25rem; }
+  .rastreio-resultado__status { padding: 0.85rem 1rem; }
+  .rastreio-resultado__status-rotulo { font-size: 1.05rem; }
+  .rastreio-resultado__info { flex-direction: column; gap: 0.1rem; }
+  .rastreio-resultado__info-valor { text-align: left; }
+}

@@ -126,8 +126,13 @@ function montarSucesso(dados) {
   const infos = elemento("div", "rastreio-infos");
   const transportadora = bloco("Transportadora", dados.transportadora);
   if (transportadora) infos.append(transportadora);
-  // Previsao vencida ja foi explicada no aviso de atraso; nao repetir.
-  if (!dados.entrega_atrasada) {
+
+  // A previsao so interessa a quem AINDA espera. Omitimos em dois casos:
+  // - entregue: o pedido chegou, e a previsao vencida so apontaria um atraso
+  //   para quem ja recebeu;
+  // - atrasado: o aviso acima ja menciona a data, repetir seria redundante.
+  const entregue = atual.grupo === "entregue";
+  if (!dados.entrega_atrasada && !entregue) {
     const previsao = bloco("Previsao de entrega", formatarData(dados.previsao_entrega));
     if (previsao) infos.append(previsao);
   }

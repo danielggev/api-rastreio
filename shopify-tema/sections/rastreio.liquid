@@ -1,0 +1,188 @@
+{% comment %}
+  Secao de rastreio de pedido.
+
+  O cliente informa e-mail + numero do pedido; a API valida na Shopify e
+  devolve o status vindo da Frete Rapido.
+
+  Os textos e o endereco da API sao editaveis pelo editor de temas -- trocar o
+  dominio da API nao exige mexer em codigo.
+{% endcomment %}
+
+{{ 'rastreio.css' | asset_url | stylesheet_tag }}
+
+<section class="rastreio" style="background: {{ section.settings.cor_fundo }};">
+  <div class="rastreio__grid">
+
+    {% if section.settings.imagem %}
+      <div class="rastreio__media">
+        <img
+          src="{{ section.settings.imagem | image_url: width: 900 }}"
+          alt="{{ section.settings.imagem.alt | escape }}"
+          width="900"
+          height="{{ 900 | divided_by: section.settings.imagem.aspect_ratio | round }}"
+          loading="lazy">
+      </div>
+    {% endif %}
+
+    <div class="rastreio__card">
+      <h1 class="rastreio__titulo">
+        {{ section.settings.titulo }}
+        {% if section.settings.titulo_destaque != blank %}
+          <span>{{ section.settings.titulo_destaque }}</span>
+        {% endif %}
+      </h1>
+
+      {% if section.settings.subtitulo != blank %}
+        <p class="rastreio__subtitulo">{{ section.settings.subtitulo }}</p>
+      {% endif %}
+
+      {%- comment -%}
+        O endereco da API vai num data-attribute em vez de variavel global:
+        assim duas secoes na mesma pagina nao brigam pelo mesmo valor.
+      {%- endcomment -%}
+      <form class="rastreio__form" id="rastreio-form" data-api="{{ section.settings.api_url }}" novalidate>
+        <div>
+          <label for="rastreio-email" class="rastreio__visually-hidden">E-mail da compra</label>
+          <input
+            type="email"
+            id="rastreio-email"
+            name="email"
+            placeholder="{{ section.settings.placeholder_email }}"
+            autocomplete="email"
+            required>
+        </div>
+        <div>
+          <label for="rastreio-pedido" class="rastreio__visually-hidden">Numero do pedido</label>
+          <input
+            type="text"
+            id="rastreio-pedido"
+            name="pedido"
+            placeholder="{{ section.settings.placeholder_pedido }}"
+            inputmode="numeric"
+            required>
+        </div>
+        <button type="submit" class="rastreio__submit">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+            <circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/>
+          </svg>
+          {{ section.settings.texto_botao }}
+        </button>
+      </form>
+
+      {%- comment -%}
+        aria-live faz o leitor de tela anunciar o resultado. Sem isso, quem usa
+        leitor envia o formulario e nao recebe retorno algum.
+      {%- endcomment -%}
+      <div id="rastreio-resultado" aria-live="polite" aria-atomic="true"></div>
+
+      {% if section.settings.nota_privacidade != blank %}
+        <p class="rastreio__nota">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+            <rect x="3" y="11" width="18" height="11" rx="2" ry="2"/>
+            <path d="M7 11V7a5 5 0 0 1 10 0v4"/>
+          </svg>
+          {{ section.settings.nota_privacidade }}
+        </p>
+      {% endif %}
+
+      {% if section.settings.rodape != blank %}
+        <p class="rastreio__rodape">{{ section.settings.rodape }}</p>
+      {% endif %}
+    </div>
+
+  </div>
+</section>
+
+<script src="{{ 'rastreio.js' | asset_url }}" defer></script>
+
+{% schema %}
+{
+  "name": "Rastreio de pedido",
+  "tag": "section",
+  "settings": [
+    {
+      "type": "header",
+      "content": "Conexao com a API"
+    },
+    {
+      "type": "text",
+      "id": "api_url",
+      "label": "Endereco da API",
+      "default": "https://rastreio.srv1835728.hstgr.cloud/api/v1/rastreio",
+      "info": "Trocar aqui se o dominio da API mudar. Nao exige editar codigo."
+    },
+    {
+      "type": "header",
+      "content": "Textos"
+    },
+    {
+      "type": "text",
+      "id": "titulo",
+      "label": "Titulo",
+      "default": "Rastreie seu pedido"
+    },
+    {
+      "type": "text",
+      "id": "titulo_destaque",
+      "label": "Titulo em destaque (segunda linha)",
+      "default": "rapidamente"
+    },
+    {
+      "type": "text",
+      "id": "subtitulo",
+      "label": "Subtitulo",
+      "default": "Preencha as informacoes que fazemos o resto pra voce"
+    },
+    {
+      "type": "text",
+      "id": "placeholder_email",
+      "label": "Placeholder do e-mail",
+      "default": "E-mail"
+    },
+    {
+      "type": "text",
+      "id": "placeholder_pedido",
+      "label": "Placeholder do numero do pedido",
+      "default": "Numero do pedido"
+    },
+    {
+      "type": "text",
+      "id": "texto_botao",
+      "label": "Texto do botao",
+      "default": "Rastrear meu pedido"
+    },
+    {
+      "type": "text",
+      "id": "nota_privacidade",
+      "label": "Nota de privacidade",
+      "default": "Seus dados sao utilizados apenas para localizar seu pedido."
+    },
+    {
+      "type": "richtext",
+      "id": "rodape",
+      "label": "Rodape",
+      "default": "<p>Nao lembra o numero? Procure em Minha conta</p>"
+    },
+    {
+      "type": "header",
+      "content": "Aparencia"
+    },
+    {
+      "type": "image_picker",
+      "id": "imagem",
+      "label": "Imagem ao lado do formulario"
+    },
+    {
+      "type": "color",
+      "id": "cor_fundo",
+      "label": "Cor de fundo da secao",
+      "default": "#f4f4f4"
+    }
+  ],
+  "presets": [
+    {
+      "name": "Rastreio de pedido"
+    }
+  ]
+}
+{% endschema %}
