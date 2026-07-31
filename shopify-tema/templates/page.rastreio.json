@@ -12,7 +12,9 @@
         "texto_botao": "Rastrear meu pedido",
         "nota_privacidade": "Seus dados são utilizados apenas para localizar seu pedido.",
         "rodape": "<p>Não lembra o número? Procure em <a href=\"/account\">Minha conta</a></p>",
-        "cor_fundo": "#f4f4f4"
+        "cor_fundo": "#f4f4f4",
+        "espaco_topo": 88,
+        "espaco_base": 56
       }
     }
   },

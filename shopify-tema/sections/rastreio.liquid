@@ -10,8 +10,19 @@
 
 {{ 'rastreio.css' | asset_url | stylesheet_tag }}
 
-<section class="rastreio" style="background: {{ section.settings.cor_fundo }};">
-  <div class="rastreio__grid">
+<section
+  class="rastreio"
+  style="
+    background: {{ section.settings.cor_fundo }};
+    --rt-pad-topo: {{ section.settings.espaco_topo }}px;
+    --rt-pad-base: {{ section.settings.espaco_base }}px;
+  ">
+  {%- comment -%}
+    Sem imagem, o grid de duas colunas deixaria o card espremido na coluna
+    estreita, com um vazio ao lado. O modificador transforma em coluna unica
+    centralizada.
+  {%- endcomment -%}
+  <div class="rastreio__grid{% unless section.settings.imagem %} rastreio__grid--sem-imagem{% endunless %}">
 
     {% if section.settings.imagem %}
       <div class="rastreio__media">
@@ -177,6 +188,27 @@
       "id": "cor_fundo",
       "label": "Cor de fundo da secao",
       "default": "#f4f4f4"
+    },
+    {
+      "type": "range",
+      "id": "espaco_topo",
+      "label": "Espaco no topo",
+      "min": 0,
+      "max": 160,
+      "step": 8,
+      "unit": "px",
+      "default": 88,
+      "info": "Aumente se o menu do tema estiver cobrindo o topo do card."
+    },
+    {
+      "type": "range",
+      "id": "espaco_base",
+      "label": "Espaco embaixo",
+      "min": 0,
+      "max": 160,
+      "step": 8,
+      "unit": "px",
+      "default": 56
     }
   ],
   "presets": [

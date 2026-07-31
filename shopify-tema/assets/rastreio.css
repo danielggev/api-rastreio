@@ -20,7 +20,9 @@
   --rt-branco: #FFFFFF;
 
   background: #f4f4f4;
-  padding-block: 3rem 2.5rem;
+  /* Configuraveis pelo editor de temas: menus fixos ou sobrepostos variam de
+     tema para tema, e sem folga o card fica coberto. */
+  padding-block: var(--rt-pad-topo, 88px) var(--rt-pad-base, 56px);
 }
 
 .rastreio__grid {
@@ -31,6 +33,13 @@
   grid-template-columns: 0.9fr 1.1fr;
   gap: 3rem;
   align-items: center;
+}
+
+/* Sem imagem, duas colunas deixariam o card espremido na coluna estreita com
+   um vazio ao lado. Uma coluna centralizada e o comportamento correto. */
+.rastreio__grid--sem-imagem {
+  grid-template-columns: 1fr;
+  max-width: 560px;
 }
 
 .rastreio__media img {
@@ -378,6 +387,8 @@
 }
 
 @media (max-width: 768px) {
+  /* No celular o menu costuma ser compacto: a folga generosa do desktop viraria
+     um vazio enorme antes do formulario. */
   .rastreio { padding-block: 2rem 1.5rem; }
   .rastreio__card { padding: 2rem 1.5rem; }
 }
