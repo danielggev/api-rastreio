@@ -199,8 +199,13 @@ Gerando os segredos:
 
 ```bash
 python3 -c "import secrets; print(secrets.token_urlsafe(48))"   # EMAIL_HMAC_KEY
-openssl rand -base64 32                                          # POSTGRES_PASSWORD
+openssl rand -hex 24                                             # POSTGRES_PASSWORD
 ```
+
+> **A senha do Postgres precisa ser segura em URL.** Ela é interpolada na
+> `DATABASE_URL`, e caracteres como `/`, `+` ou `@` quebram o parser — a conexão
+> falha com um erro que não aponta para a causa. Por isso hexadecimal, e não
+> `base64`.
 
 > **A `EMAIL_HMAC_KEY` não pode mudar depois.** Trocá-la invalida a correlação de
 > todos os logs anteriores — os hashes antigos deixam de bater com os novos.
