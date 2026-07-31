@@ -356,30 +356,40 @@
   margin: 0.5rem 0 0;
 }
 
+/* `!important` na lista e no item: temas definem margens, recuos e marcadores
+   para `ol`/`li` com seletores bem especificos. Sem forcar, o recuo do item
+   some e o texto nasce por baixo das bolinhas da linha do tempo. */
+.rastreio .rastreio-resultado__historico,
 .rastreio-resultado__historico {
-  list-style: none;
-  margin: 0;
-  padding: 0;
+  list-style: none !important;
+  margin: 0 !important;
+  padding: 0 !important;
   display: flex;
   flex-direction: column;
   gap: 1rem;
 }
 
+.rastreio .rastreio-resultado__evento,
 .rastreio-resultado__evento {
   --rt-cor: var(--color-gray-400, #ADB5BD);
   position: relative;
   display: flex;
   flex-direction: column;
   gap: 0.15rem;
-  padding-left: 1.5rem;
+  /* Espaco reservado para a bolinha (12px) mais folga ate o texto. */
+  padding-left: 1.75rem !important;
+  margin: 0 !important;
+  list-style: none !important;
 }
+/* Alguns temas desenham o marcador da lista mesmo com list-style: none. */
+.rastreio-resultado__evento::marker { content: none; }
 
 /* Trilho continuo ligando os pontos da linha do tempo. */
 .rastreio-resultado__evento::before {
   content: '';
   position: absolute;
-  left: 4px;
-  top: 0.45rem;
+  left: 5px;
+  top: 0.9rem;
   bottom: -1rem;
   width: 2px;
   background: var(--rt-borda);
@@ -390,15 +400,14 @@
   content: '';
   position: absolute;
   left: 0;
-  top: 0.3rem;
-  width: 10px;
-  height: 10px;
+  /* Alinhado com a primeira linha do texto, nao com o topo do bloco. */
+  top: 0.35rem;
+  width: 12px;
+  height: 12px;
   border-radius: 50%;
   background: var(--rt-cor);
-}
-/* O evento mais recente e o de cima: recebe o ponto maior. */
-.rastreio-resultado__evento:first-child::after {
-  width: 12px; height: 12px; left: -1px; top: 0.25rem;
+  /* Anel branco separa a bolinha do trilho que passa atras dela. */
+  box-shadow: 0 0 0 3px var(--rt-branco);
 }
 
 .rastreio-resultado__evento--coletado,
