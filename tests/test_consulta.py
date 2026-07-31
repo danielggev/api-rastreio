@@ -181,7 +181,9 @@ async def test_sucesso_consolida_previsao_e_transportadora() -> None:
 
     resposta = consulta.resposta
     assert resposta.previsao_entrega == date(2026, 7, 29)  # type: ignore[union-attr]
-    assert resposta.transportadora == "JADLOG LOGISTICA S.A"  # type: ignore[union-attr]
+    # A razao social vira nome comercial na resposta: o cliente reconhece
+    # "Jadlog", nao "JADLOG LOGISTICA S.A".
+    assert resposta.transportadora == "Jadlog"  # type: ignore[union-attr]
     assert resposta.status_atual.grupo is Grupo.PREPARANDO  # type: ignore[union-attr]
 
 

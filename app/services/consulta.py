@@ -36,6 +36,7 @@ from app.services.normalizacao import NumeroPedidoErro, NumeroPedidoFR
 from app.services.ocorrencias import classificar
 from app.services.ordenacao import ordenar_desc
 from app.services.shopify import ClienteShopify, ShopifyErro
+from app.services.transportadora import nome_amigavel
 
 logger = logging.getLogger(__name__)
 
@@ -220,7 +221,9 @@ class ServicoConsulta:
                 pedido=pedido.name,
                 status_atual=status_atual,
                 historico=historico,
-                transportadora=consolidacao.transportadora(ordenadas),
+                # Razao social -> nome comercial: o cliente conhece "Correios",
+                # nao "EMPRESA BRASILEIRA DE CORREIOS E TELEGRAFOS".
+                transportadora=nome_amigavel(consolidacao.transportadora(ordenadas)),
                 previsao_entrega=previsao,
                 entrega_atrasada=entrega_atrasada(previsao, entregue),
             ),
