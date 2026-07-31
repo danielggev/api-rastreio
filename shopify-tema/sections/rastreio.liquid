@@ -96,8 +96,14 @@
         </p>
       {% endif %}
 
+      {%- comment -%}
+        `div`, nao `p`: o campo richtext ja devolve o proprio <p>, e um <p>
+        dentro de outro e HTML invalido -- o navegador fecha o externo sozinho,
+        e o conteudo escapa do elemento estilizado (perdendo centralizacao e
+        estilo dos links).
+      {%- endcomment -%}
       {% if section.settings.rodape != blank %}
-        <p class="rastreio__rodape">{{ section.settings.rodape }}</p>
+        <div class="rastreio__rodape">{{ section.settings.rodape }}</div>
       {% endif %}
     </div>
 

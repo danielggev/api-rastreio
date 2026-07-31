@@ -63,12 +63,23 @@
 
 .rastreio__titulo {
   font-size: clamp(1.625rem, 2.6vw, 2.125rem);
+  /* Peso explicito: sem isto o tema decide, e a segunda linha pode herdar um
+     peso diferente da primeira. */
+  font-weight: 900;
   color: var(--rt-navy);
   line-height: 1.15;
   text-align: center;
   margin: 0;
 }
-.rastreio__titulo span { display: block; color: var(--rt-azul); }
+/* Muda so a cor -- fonte, peso e tamanho vem do titulo, para as duas linhas
+   ficarem visualmente iguais. */
+.rastreio__titulo span {
+  display: block;
+  color: var(--rt-azul);
+  font-family: inherit;
+  font-weight: inherit;
+  font-size: inherit;
+}
 
 .rastreio__subtitulo {
   color: var(--rt-cinza);
@@ -100,6 +111,9 @@
 .rastreio__form input::placeholder { color: var(--color-gray-400, #ADB5BD); }
 .rastreio__form input:focus { outline: none; border-color: var(--rt-azul); }
 
+/* Seletor duplo eleva a especificidade acima das regras de `button` do tema,
+   que costumam definir o proprio peso de fonte e venceriam a nossa. */
+.rastreio .rastreio__submit,
 .rastreio__submit {
   width: 100%;
   padding: 1rem 1.5rem;
@@ -133,13 +147,34 @@
   text-align: center;
   margin: 0;
 }
+/* O richtext gera um <p> proprio dentro do container: precisa herdar o
+   alinhamento e nao trazer margem do tema. */
+.rastreio__rodape p {
+  margin: 0;
+  text-align: center;
+  color: inherit;
+  font-size: inherit;
+}
+
 .rastreio__nota {
   display: flex;
-  align-items: center;
+  /* `flex-start` para o cadeado acompanhar a PRIMEIRA linha quando o texto
+     quebra em duas -- centralizado, ele flutuaria no meio do bloco. */
+  align-items: flex-start;
   justify-content: center;
   gap: 0.35rem;
 }
-.rastreio__nota svg { width: 14px; height: 14px; flex-shrink: 0; }
+.rastreio__nota svg {
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+  /* Compensa a diferenca entre a altura do icone e a da linha de texto. */
+  margin-top: 0.15em;
+}
+
+/* Seletor duplo: temas costumam remover sublinhado de links com regras de
+   especificidade alta, que venceriam a nossa. */
+.rastreio .rastreio__rodape a,
 .rastreio__rodape a {
   color: var(--rt-navy);
   font-weight: 700;
@@ -386,6 +421,12 @@
   .rastreio__grid { grid-template-columns: 1fr; gap: 2rem; }
   .rastreio__media { max-width: 480px; margin-inline: auto; }
   .rastreio__card { max-width: 480px; margin-inline: auto; }
+
+  /* O formulario vem PRIMEIRO no celular: quem abre esta pagina quer consultar
+     o pedido, nao ver a foto. Deixar a imagem no topo empurraria o campo de
+     e-mail para fora da tela inicial. */
+  .rastreio__card { order: 1; }
+  .rastreio__media { order: 2; }
 }
 
 @media (max-width: 768px) {
