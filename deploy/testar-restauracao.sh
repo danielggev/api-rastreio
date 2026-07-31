@@ -10,9 +10,12 @@
 set -euo pipefail
 
 ARQUIVO="${1:?informe o arquivo .sql.gz do backup}"
-COMPOSE="${COMPOSE_FILE:-/opt/rastreio/deploy/docker-compose.prod.yml}"
+RAIZ="${RAIZ:-/opt/rastreio}"
+COMPOSE_FILE="${COMPOSE_FILE:-$RAIZ/deploy/docker-compose.traefik.yml}"
 USUARIO="${POSTGRES_USER:-rastreio}"
 TEMP="teste_restauracao_$$"
+
+dc() { docker compose --env-file "$RAIZ/.env" -f "$COMPOSE_FILE" "$@"; }
 
 if [ ! -s "$ARQUIVO" ]; then
     echo "ERRO: arquivo inexistente ou vazio: $ARQUIVO" >&2
@@ -22,29 +25,25 @@ fi
 echo "Restaurando $ARQUIVO em uma base temporaria ($TEMP)..."
 
 limpar() {
-    docker compose -f "$COMPOSE" exec -T db \
-        psql -U "$USUARIO" -d postgres -c "DROP DATABASE IF EXISTS $TEMP;" >/dev/null 2>&1 || true
+    dc exec -T db psql -U "$USUARIO" -d postgres \
+        -c "DROP DATABASE IF EXISTS $TEMP;" >/dev/null 2>&1 || true
 }
 trap limpar EXIT
 
-docker compose -f "$COMPOSE" exec -T db \
-    psql -U "$USUARIO" -d postgres -c "CREATE DATABASE $TEMP;" >/dev/null
+dc exec -T db psql -U "$USUARIO" -d postgres -c "CREATE DATABASE $TEMP;" >/dev/null
 
-gunzip -c "$ARQUIVO" | docker compose -f "$COMPOSE" exec -T db \
-    psql -U "$USUARIO" -d "$TEMP" >/dev/null
+gunzip -c "$ARQUIVO" | dc exec -T db psql -U "$USUARIO" -d "$TEMP" >/dev/null
 
-tabelas=$(docker compose -f "$COMPOSE" exec -T db \
-    psql -U "$USUARIO" -d "$TEMP" -tAc \
-    "SELECT count(*) FROM information_schema.tables WHERE table_schema='public';")
+tabelas=$(dc exec -T db psql -U "$USUARIO" -d "$TEMP" -tAc \
+    "SELECT count(*) FROM information_schema.tables WHERE table_schema='public';" | tr -d '\r')
 
-registros=$(docker compose -f "$COMPOSE" exec -T db \
-    psql -U "$USUARIO" -d "$TEMP" -tAc \
-    "SELECT count(*) FROM consulta_log;" 2>/dev/null || echo "0")
+registros=$(dc exec -T db psql -U "$USUARIO" -d "$TEMP" -tAc \
+    "SELECT count(*) FROM consulta_log;" 2>/dev/null | tr -d '\r' || echo "0")
 
-echo "  tabelas restauradas : $tabelas"
+echo "  tabelas restauradas       : $tabelas"
 echo "  registros em consulta_log : $registros"
 
-if [ "$tabelas" -lt 2 ]; then
+if [ "${tabelas:-0}" -lt 2 ]; then
     echo "FALHOU: esperava ao menos consulta_log e rastreio_cache." >&2
     exit 1
 fi
