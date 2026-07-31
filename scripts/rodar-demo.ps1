@@ -87,7 +87,7 @@ if (-not $pronta) {
 }
 
 Write-Host "API no ar. Abrindo o prototipo..." -ForegroundColor Green
-Start-Process (Join-Path $PSScriptRoot "index.html")
+# A pagina agora vive no tema da Shopify; sem HTML local para abrir.
 
 Write-Host ""
 Write-Host "Pedidos de teste: 900001 a 900013  |  email: demo@exemplo.com" -ForegroundColor Yellow
