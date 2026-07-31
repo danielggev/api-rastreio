@@ -65,8 +65,8 @@ DEMO_MODE=false
 ### B3. Subir
 
 ```bash
-docker compose -f deploy/docker-compose.traefik.yml up -d --build
-docker compose -f deploy/docker-compose.traefik.yml exec api alembic upgrade head
+docker compose --env-file .env -f deploy/docker-compose.traefik.yml up -d --build
+docker compose --env-file .env -f deploy/docker-compose.traefik.yml exec api alembic upgrade head
 ```
 
 Confira que o n8n continua no ar — nada deve ter sido afetado:
@@ -221,14 +221,14 @@ precisa ser editado.
 ## Passo 5 — Subir
 
 ```bash
-docker compose -f deploy/docker-compose.prod.yml up -d --build
-docker compose -f deploy/docker-compose.prod.yml ps
+docker compose --env-file .env -f deploy/docker-compose.prod.yml up -d --build
+docker compose --env-file .env -f deploy/docker-compose.prod.yml ps
 ```
 
 ## Passo 6 — Criar as tabelas
 
 ```bash
-docker compose -f deploy/docker-compose.prod.yml exec api alembic upgrade head
+docker compose --env-file .env -f deploy/docker-compose.prod.yml exec api alembic upgrade head
 ```
 
 ## Passo 7 — Verificar
@@ -266,7 +266,7 @@ done; echo
 E confirme no banco que o IP gravado é público, não `172.x` nem `127.0.0.1`:
 
 ```bash
-docker compose -f deploy/docker-compose.prod.yml exec db \
+docker compose --env-file .env -f deploy/docker-compose.prod.yml exec db \
   psql -U rastreio -d rastreio -c \
   "SELECT ip_origem, resultado, criado_em FROM consulta_log ORDER BY id DESC LIMIT 5;"
 ```
@@ -286,7 +286,7 @@ crontab -e
 0 3 * * * /opt/rastreio/deploy/backup.sh >> /var/log/rastreio-backup.log 2>&1
 
 # Expurgo LGPD (90 dias) às 4h
-0 4 * * * cd /opt/rastreio && docker compose -f deploy/docker-compose.prod.yml exec -T api python scripts/expurgar.py >> /var/log/rastreio-expurgo.log 2>&1
+0 4 * * * cd /opt/rastreio && docker compose --env-file .env -f deploy/docker-compose.prod.yml exec -T api python scripts/expurgar.py >> /var/log/rastreio-expurgo.log 2>&1
 ```
 
 **Teste a restauração uma vez** — backup nunca verificado costuma não funcionar,
@@ -342,7 +342,7 @@ API_DOMINIO=api.grudadoemvoce.com.br
 4. Reinicie o Caddy — ele emite o novo certificado sozinho:
 
 ```bash
-docker compose -f deploy/docker-compose.prod.yml up -d caddy
+docker compose --env-file .env -f deploy/docker-compose.prod.yml up -d caddy
 ```
 
 5. Atualize o `assets/js/rastreio.js` do tema com o novo endereço
@@ -358,7 +358,7 @@ O sslip.io é compartilhado por muita gente, e o Let's Encrypt impõe limites po
 domínio registrado. Se o Caddy não conseguir emitir:
 
 ```bash
-docker compose -f deploy/docker-compose.prod.yml logs caddy | grep -i "certificate\|acme\|rate"
+docker compose --env-file .env -f deploy/docker-compose.prod.yml logs caddy | grep -i "certificate\|acme\|rate"
 ```
 
 Aparecendo erro de limite (`too many certificates`), as saídas são:
@@ -380,14 +380,14 @@ Aparecendo erro de limite (`too many certificates`), as saídas são:
 
 ```bash
 # Logs
-docker compose -f deploy/docker-compose.prod.yml logs -f api
+docker compose --env-file .env -f deploy/docker-compose.prod.yml logs -f api
 
 # Reiniciar
-docker compose -f deploy/docker-compose.prod.yml restart api
+docker compose --env-file .env -f deploy/docker-compose.prod.yml restart api
 
 # Atualizar o código
-git pull && docker compose -f deploy/docker-compose.prod.yml up -d --build
-docker compose -f deploy/docker-compose.prod.yml exec api alembic upgrade head
+git pull && docker compose --env-file .env -f deploy/docker-compose.prod.yml up -d --build
+docker compose --env-file .env -f deploy/docker-compose.prod.yml exec api alembic upgrade head
 ```
 
 ### O que observar nos logs
