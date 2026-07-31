@@ -72,13 +72,20 @@
   margin: 0;
 }
 /* Muda so a cor -- fonte, peso e tamanho vem do titulo, para as duas linhas
-   ficarem visualmente iguais. */
+   ficarem visualmente iguais.
+
+   `!important` aqui e deliberado: varios temas definem um peso proprio para
+   `span` dentro de titulo (o padrao de "palavra em destaque"), com seletores
+   que vencem qualquer especificidade razoavel nossa. Como o escopo e restrito
+   a esta secao, o efeito colateral e nulo. */
+.rastreio .rastreio__titulo span,
 .rastreio__titulo span {
   display: block;
   color: var(--rt-azul);
-  font-family: inherit;
-  font-weight: inherit;
-  font-size: inherit;
+  font-family: inherit !important;
+  font-weight: 900 !important;
+  font-size: inherit !important;
+  font-style: normal !important;
 }
 
 .rastreio__subtitulo {
@@ -111,8 +118,10 @@
 .rastreio__form input::placeholder { color: var(--color-gray-400, #ADB5BD); }
 .rastreio__form input:focus { outline: none; border-color: var(--rt-azul); }
 
-/* Seletor duplo eleva a especificidade acima das regras de `button` do tema,
-   que costumam definir o proprio peso de fonte e venceriam a nossa. */
+/* `!important` no peso e na fonte: temas costumam estilizar `button` com
+   seletores muito especificos (as vezes com !important proprio), e sem isto o
+   texto do botao herda o peso do tema em vez do nosso. Escopo restrito a esta
+   secao, entao nao afeta mais nada. */
 .rastreio .rastreio__submit,
 .rastreio__submit {
   width: 100%;
@@ -121,8 +130,8 @@
   color: var(--rt-navy);
   border: none;
   border-radius: 999px;
-  font-family: inherit;
-  font-weight: 900;
+  font-family: inherit !important;
+  font-weight: 900 !important;
   font-size: 1rem;
   cursor: pointer;
   display: inline-flex;
@@ -434,6 +443,12 @@
      um vazio enorme antes do formulario. */
   .rastreio { padding-block: 2rem 1.5rem; }
   .rastreio__card { padding: 2rem 1.5rem; }
+
+  /* Imagem escondida no celular: e decorativa, pesa no carregamento de quem
+     esta em rede movel, e ocupa uma tela inteira sem ajudar quem veio consultar
+     um pedido. O `loading="lazy"` evita ate o download, ja que ela nunca entra
+     no viewport. */
+  .rastreio__media { display: none; }
 }
 
 @media (max-width: 480px) {
