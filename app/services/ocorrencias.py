@@ -149,7 +149,6 @@ _POR_GRUPO: dict[Grupo, frozenset[int]] = {
             207,  # Destinatario ausente - 3a tentativa
             208,  # Destinatario ausente por ferias
             261,  # Entrega nao realizada - cliente fechado para balanco
-            262,  # Entrega nao realizada - destinatario falecido
             263,  # Entrega nao realizada - falta de espaco no deposito
             264,  # Entrega nao realizada - sem documento de identificacao
             265,  # Entrega nao realizada por restricao de horario
@@ -159,8 +158,20 @@ _POR_GRUPO: dict[Grupo, frozenset[int]] = {
             342,  # Tentativa de entrega frustrada - tempo de espera excedido
         }
     ),
+    # Sem texto de orientacao na pagina (ver `ORIENTACAO` em rastreio.js): o
+    # cliente ve o rotulo da propria Frete Rapido e nada mais. E o grupo certo
+    # para o que exige tratamento humano, nao instrucao automatica.
     Grupo.PROBLEMA: frozenset(
         {
+            # 262 "destinatario falecido" fica AQUI, e nao em TENTATIVA_FALHA,
+            # apesar de ser literalmente uma tentativa de entrega frustrada.
+            # Naquele grupo a pagina respondia "normalmente uma nova tentativa
+            # acontece nos proximos dias uteis" -- uma promessa automatica e
+            # cruel para quem acabou de perder alguem. E, com o aviso proativo
+            # ligado, viraria um WhatsApp para o telefone do falecido.
+            #
+            # A classificacao correta e a que produz o comportamento correto.
+            262,
             21, 24, 25, 28, 29, 31, 33, 40, 41, 42, 43, 44, 45,
             97, 98, 101, 103, 105, 107, 108, 109, 110, 111, 112,
             116, 117, 119, 122, 125, 126, 135, 136, 137,

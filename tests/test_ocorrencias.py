@@ -78,6 +78,25 @@ def test_reversa_nunca_e_entregue() -> None:
         assert classificar(codigo) is Grupo.DEVOLUCAO
 
 
+def test_obito_do_destinatario_nao_recebe_tratamento_automatico() -> None:
+    """262 = "Entrega nao realizada - destinatario falecido".
+
+    Literalmente e uma tentativa de entrega frustrada, e por isso estava em
+    TENTATIVA_FALHA. Mas aquele grupo produz DOIS comportamentos automaticos que
+    nao cabem aqui:
+
+    1. Na pagina, o texto "normalmente uma nova tentativa acontece nos proximos
+       dias uteis" -- uma promessa para quem acabou de perder alguem.
+    2. Com o aviso proativo ligado, um WhatsApp para o telefone do falecido.
+
+    `problema` nao dispara notificacao e nao tem texto de orientacao: o cliente
+    ve o rotulo da propria Frete Rapido e a equipe trata o caso a mao. A
+    classificacao correta e a que produz o comportamento correto.
+    """
+    assert classificar(262) is Grupo.PROBLEMA
+    assert not exige_acao_do_cliente(classificar(262))
+
+
 def test_grupos_que_exigem_acao() -> None:
     assert exige_acao_do_cliente(Grupo.AGUARDANDO_RETIRADA)
     assert exige_acao_do_cliente(Grupo.TENTATIVA_FALHA)
