@@ -545,10 +545,31 @@ seria uma terceira barreira sem ganho.
   contra uma mensagem constrangedora.
 - **Canal: deixar vazio** — vazio significa todos os canais.
 
-Como a operação usa **3 CNPJs**, confirme com o suporte se o cadastro é por CNPJ
-ou por conta, e se os três podem apontar para a mesma URL. Aproveite e peça as
-**faixas de IP de origem** — com elas dá para fechar a rota no Traefik, a camada
-de segurança mais forte disponível.
+**São 3 cadastros, um por CNPJ** — confirmado com o suporte em 03/08/2026. E cada
+um recebe uma **URL diferente**, com seu próprio segredo (`FR_WEBHOOK_SEGREDOS`).
+
+O motivo não é organização, é detecção de falha. O payload não diz qual
+embarcador originou o evento — o único CNPJ no corpo é o da transportadora. Com
+uma URL única para os três, um cadastro apagado, alterado ou com a URL colada
+errada seria **indistinguível de um CNPJ com pouco movimento**: o relatório
+continuaria parecendo saudável, mostrando dois terços da operação. Com segredos
+separados, o relatório 12 do `monitor.sql` mostra os três lado a lado e denuncia
+quem emudeceu.
+
+Depois de cadastrar os três, valide cada URL isoladamente — a resposta devolve
+qual CNPJ atendeu:
+
+```bash
+curl -s -X POST ".../frete-rapido/<SEGREDO_DO_CNPJ>" \
+  -H "Authorization: Bearer $FR_WEBHOOK_BEARER" \
+  -H "Content-Type: application/json" -d @tests/fixtures/webhook-ocorrencia-232.json
+# -> {"status":"observado","grupo":"aguardando_retirada","cnpj":"grudado"}
+```
+
+Se o `cnpj` da resposta não for o esperado, a URL foi colada no cadastro errado.
+
+Aproveite o contato com o suporte e peça as **faixas de IP de origem** — com elas
+dá para fechar a rota no Traefik, a camada de segurança mais forte disponível.
 
 **7. Deixar rodando de uma a duas semanas** e então:
 

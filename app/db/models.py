@@ -102,6 +102,15 @@ class EventoFrete(Base):
     status: Mapped[str] = mapped_column(String(16), index=True)
     tentativas: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
 
+    # Qual dos CNPJs originou o evento, deduzido do segredo da URL (ha um
+    # cadastro por CNPJ no Dash FR). O payload da Frete Rapido nao carrega essa
+    # informacao -- so o CNPJ da TRANSPORTADORA, que e outra coisa.
+    #
+    # Serve menos para estatistica e mais para detectar falha: sem ele, um
+    # cadastro que parasse de enviar seria indistinguivel de um CNPJ com pouco
+    # movimento. Nulo quando se usa o FR_WEBHOOK_SEGREDO avulso.
+    cnpj: Mapped[str | None] = mapped_column(String(64), index=True)
+
     recebido_em: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), index=True
     )

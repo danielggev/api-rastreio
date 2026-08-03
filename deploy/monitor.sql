@@ -219,7 +219,35 @@ WHERE recebido_em > now() - interval '30 days'
 
 \echo
 \echo ==========================================================
-\echo  12. AVISOS PRESOS -- a FR ja desistiu de reenviar
+\echo  12. OS 3 CNPJs ESTAO TODOS ENVIANDO?
+\echo ==========================================================
+\echo  O cadastro de webhook na Frete Rapido e POR CNPJ, e cada
+\echo  um usa uma URL com segredo proprio -- e assim que sabemos
+\echo  a origem, ja que o payload nao informa o embarcador.
+\echo
+\echo  CNPJ que sumiu da lista, ou com ultimo_evento de dias
+\echo  atras, significa cadastro apagado, alterado, ou URL colada
+\echo  errada no painel. Sem esta quebra, isso seria
+\echo  indistinguivel de um CNPJ com pouco movimento.
+\echo
+\echo  Esperado: 3 linhas (grudado, melhores, tudo).
+
+SELECT coalesce(cnpj, '(sem identificacao)')                  AS cnpj,
+       count(*)                                                AS eventos,
+       count(DISTINCT numero_pedido)                           AS pedidos,
+       count(*) FILTER (WHERE status IN ('observado','enviado')) AS avisariam,
+       max(recebido_em AT TIME ZONE 'America/Sao_Paulo')        AS ultimo_evento,
+       round(
+           extract(epoch FROM now() - max(recebido_em)) / 3600.0, 1
+       )                                                        AS horas_atras
+FROM evento_frete
+WHERE recebido_em > now() - interval '30 days'
+GROUP BY cnpj
+ORDER BY eventos DESC;
+
+\echo
+\echo ==========================================================
+\echo  13. AVISOS PRESOS -- a FR ja desistiu de reenviar
 \echo ==========================================================
 \echo  A escada de reentrega da FR dura ~24h. Linha em pendente
 \echo  alem disso significa que o aviso NAO saiu e ninguem soube:
@@ -228,6 +256,7 @@ WHERE recebido_em > now() - interval '30 days'
 SELECT numero_pedido,
        codigo,
        grupo,
+       coalesce(cnpj, '-') AS cnpj,
        tentativas,
        recebido_em AT TIME ZONE 'America/Sao_Paulo' AS recebido,
        erro

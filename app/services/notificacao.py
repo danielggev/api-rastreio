@@ -94,7 +94,15 @@ class ServicoNotificacao:
     # Fluxo
     # ------------------------------------------------------------------
 
-    async def processar(self, evento: WebhookOcorrenciaFR) -> Desfecho:
+    async def processar(
+        self, evento: WebhookOcorrenciaFR, cnpj: str | None = None
+    ) -> Desfecho:
+        """`cnpj` vem do segredo da URL, nao do payload.
+
+        A Frete Rapido nao diz qual embarcador originou o evento -- o unico CNPJ
+        no corpo e o da transportadora. Como ha um cadastro de webhook por CNPJ,
+        o segredo do caminho carrega essa identidade.
+        """
         grupo = classificar(evento.codigo)
 
         # O numero vem de fora e pode chegar em qualquer formato. Sem forma
@@ -117,12 +125,14 @@ class ServicoNotificacao:
 
         # 1. Gatilho. O caso comum -- e o mais barato.
         if not self.deve_notificar(evento.codigo, grupo):
-            await self._eventos.registrar(chave, grupo, StatusEvento.DESCARTADO)
+            await self._eventos.registrar(
+                chave, grupo, StatusEvento.DESCARTADO, cnpj=cnpj
+            )
             return Desfecho(StatusEvento.DESCARTADO, grupo)
 
         # 2. Reserva. Um status terminal ja gravado significa que este evento ja
         # foi resolvido: e uma reentrega da FR, e responder 200 a encerra.
-        existente = await self._eventos.reservar(chave, grupo)
+        existente = await self._eventos.reservar(chave, grupo, cnpj=cnpj)
         if existente is not None and existente is not StatusEvento.PENDENTE:
             logger.info(
                 "evento repetido do pedido %s (codigo %s): ja estava %s",

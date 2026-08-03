@@ -83,13 +83,28 @@ class Settings(BaseSettings):
     # com `compare_digest`. Vazio desliga a rota por completo.
     fr_webhook_segredo: str = ""
 
+    # UM SEGREDO POR CNPJ. O cadastro no Dash FR e por CNPJ (confirmado com o
+    # suporte em 03/08/2026), e o payload nao diz qual embarcador originou o
+    # evento -- so traz o CNPJ da TRANSPORTADORA. Dar uma URL distinta a cada
+    # cadastro e o que permite saber a origem.
+    #
+    # O ganho principal nao e estatistico, e de deteccao de falha: com uma URL
+    # unica, um cadastro que pare de enviar e indistinguivel de um CNPJ com
+    # pouco movimento. Com segredos separados, o painel mostra qual CNPJ
+    # emudeceu -- e da para revogar um sem tocar nos outros.
+    #
+    # Formato: JSON {"tag-da-loja": "segredo", ...}, com as MESMAS chaves de
+    # FRETE_RAPIDO_TOKENS.
+    fr_webhook_segredos: dict[str, str] = Field(default_factory=dict)
+
     # Bearer token exigido no cabecalho `Authorization`. O painel da Frete
     # Rapido tem campo proprio para isto -- a documentacao publica nao menciona,
     # mas o formulario de cadastro oferece Basic, Bearer e headers avulsos.
     #
     # E mecanismo MELHOR que o segredo no caminho: cabecalho nao aparece em log
     # de acesso, nem em `Referer`, nem no historico de proxy. Usamos os dois, e
-    # ambos precisam bater.
+    # ambos precisam bater. Compartilhado pelos tres cadastros: quem separa a
+    # origem e o segredo do caminho.
     fr_webhook_bearer: str = ""
 
     # Interruptor geral do ENVIO. Com `false` a API percorre o caminho inteiro
@@ -198,9 +213,27 @@ class Settings(BaseSettings):
         return _codigos(self.notificacao_codigos_ignorados)
 
     @property
+    def segredos_webhook(self) -> dict[str, str]:
+        """Segredo -> CNPJ. Invertido de proposito: a rota busca pelo segredo.
+
+        O `FR_WEBHOOK_SEGREDO` avulso continua valendo, mapeado para CNPJ
+        desconhecido (`""`). E o caminho de quem opera um CNPJ so -- e o de quem
+        ja tinha o webhook no ar antes desta mudanca, que nao pode quebrar num
+        `docker compose up`.
+        """
+        mapa = {
+            segredo: chave.strip().casefold()
+            for chave, segredo in self.fr_webhook_segredos.items()
+            if segredo
+        }
+        if self.fr_webhook_segredo:
+            mapa.setdefault(self.fr_webhook_segredo, "")
+        return mapa
+
+    @property
     def webhook_fr_habilitado(self) -> bool:
-        """A rota so existe com segredo configurado."""
-        return bool(self.fr_webhook_segredo)
+        """A rota so existe com ao menos um segredo configurado."""
+        return bool(self.segredos_webhook)
 
     @model_validator(mode="after")
     def _validar(self) -> Settings:
@@ -282,16 +315,39 @@ class Settings(BaseSettings):
                 )
             if not self.n8n_webhook_url:
                 problemas.append("NOTIFICACAO_ATIVA=true exige N8N_WEBHOOK_URL")
-            if not self.fr_webhook_segredo:
-                problemas.append("NOTIFICACAO_ATIVA=true exige FR_WEBHOOK_SEGREDO")
+            if not self.segredos_webhook:
+                problemas.append(
+                    "NOTIFICACAO_ATIVA=true exige FR_WEBHOOK_SEGREDOS "
+                    "(ou FR_WEBHOOK_SEGREDO)"
+                )
 
-        # O segredo e a UNICA barreira da rota: a Frete Rapido nao assina o
+        # O segredo e a barreira principal da rota: a Frete Rapido nao assina o
         # payload. Curto demais e adivinhavel.
-        if self.fr_webhook_segredo and len(self.fr_webhook_segredo) < MIN_SEGREDO_WEBHOOK:
+        curtos = [
+            nome
+            for nome, valor in (
+                ("FR_WEBHOOK_SEGREDO", self.fr_webhook_segredo),
+                *(
+                    (f"FR_WEBHOOK_SEGREDOS[{chave}]", segredo)
+                    for chave, segredo in self.fr_webhook_segredos.items()
+                ),
+            )
+            if valor and len(valor) < MIN_SEGREDO_WEBHOOK
+        ]
+        for nome in curtos:
             problemas.append(
-                f"FR_WEBHOOK_SEGREDO curto demais (minimo {MIN_SEGREDO_WEBHOOK} "
-                "caracteres; gere com `python -c \"import secrets; "
+                f"{nome} curto demais (minimo {MIN_SEGREDO_WEBHOOK} caracteres; "
+                'gere com `python -c "import secrets; '
                 'print(secrets.token_urlsafe(32))"`)'
+            )
+
+        # Dois CNPJs com o MESMO segredo tornariam a origem indeterminada -- e o
+        # ponto inteiro de separar os segredos e saber a origem.
+        segredos = [s for s in self.fr_webhook_segredos.values() if s]
+        if len(segredos) != len(set(segredos)):
+            problemas.append(
+                "FR_WEBHOOK_SEGREDOS tem segredo repetido entre CNPJs: a origem "
+                "do evento ficaria indeterminada"
             )
 
         if self.notificacao_max_por_pedido < 1:

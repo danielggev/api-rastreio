@@ -40,6 +40,21 @@ router = APIRouter(prefix="/api/v1/webhook", tags=["webhook"])
 NAO_ENCONTRADO = JSONResponse(status_code=404, content={"detail": "Not Found"})
 
 
+def resolver_cnpj(segredo: str, mapa: dict[str, str]) -> str | None:
+    """CNPJ dono deste segredo, ou `None` se nenhum bater.
+
+    Percorre o mapa INTEIRO em vez de fazer `mapa.get(segredo)`: a busca em
+    dicionario compara por hash e sai no primeiro acerto, o que devolve tempos
+    diferentes conforme o palpite. Com tres entradas a diferenca e minuscula,
+    mas `compare_digest` em todas custa nada e nao exige esse tipo de analise.
+    """
+    encontrado: str | None = None
+    for esperado, cnpj in mapa.items():
+        if hmac.compare_digest(segredo, esperado):
+            encontrado = cnpj
+    return encontrado
+
+
 def bearer_confere(cabecalho: str | None, esperado: str) -> bool:
     """Valida `Authorization: Bearer <token>` em tempo constante.
 
@@ -86,8 +101,11 @@ async def receber_ocorrencia(
         return NAO_ENCONTRADO
 
     # `compare_digest` e nao `==`: a comparacao ingenua vaza, pelo tempo de
-    # resposta, quantos caracteres iniciais estao corretos.
-    if not hmac.compare_digest(segredo, s.fr_webhook_segredo):
+    # resposta, quantos caracteres iniciais estao corretos. O segredo tambem
+    # IDENTIFICA o CNPJ -- ha um cadastro por CNPJ no Dash FR, e o payload nao
+    # diz de qual embarcador veio.
+    cnpj = resolver_cnpj(segredo, s.segredos_webhook)
+    if cnpj is None:
         return NAO_ENCONTRADO
 
     if s.fr_webhook_bearer and not bearer_confere(
@@ -102,10 +120,17 @@ async def receber_ocorrencia(
         )
         return NAO_ENCONTRADO
 
-    desfecho = await servico.processar(evento)
+    desfecho = await servico.processar(evento, cnpj=cnpj)
 
     return JSONResponse(
         status_code=desfecho.status_http,
-        content={"status": desfecho.status.value, "grupo": desfecho.grupo.value},
+        content={
+            "status": desfecho.status.value,
+            "grupo": desfecho.grupo.value,
+            # Devolvido para que o `curl` de verificacao confirme QUAL cadastro
+            # do Dash FR respondeu -- sao tres, e colar a URL errada num deles e
+            # o erro mais facil de cometer.
+            "cnpj": cnpj or None,
+        },
         headers={"Cache-Control": "no-store"},
     )

@@ -584,6 +584,149 @@ def test_sem_bearer_configurado_o_cabecalho_e_ignorado(cliente: TestClient) -> N
     assert r.status_code == 200
 
 
+# --------------------------------------------------------------------------
+# Um segredo por CNPJ -- o cadastro no Dash FR e por CNPJ
+# --------------------------------------------------------------------------
+
+SEGREDOS_CNPJ = {
+    "grudado": "g" * 40,
+    "melhores": "m" * 40,
+    "tudo": "t" * 40,
+}
+
+
+def settings_multi(**kw: Any) -> Settings:
+    base: dict[str, Any] = {
+        "fr_webhook_segredo": "",
+        "fr_webhook_segredos": SEGREDOS_CNPJ,
+        "notificacao_grupos": "aguardando_retirada,tentativa_falha",
+        "notificacao_ativa": False,
+    }
+    base.update(kw)
+    return Settings(**base)
+
+
+@pytest.mark.parametrize("cnpj", list(SEGREDOS_CNPJ))
+def test_cada_segredo_identifica_seu_cnpj(cnpj: str) -> None:
+    """O payload da FR nao diz de qual embarcador veio -- so o segredo diz."""
+    from app.api.v1.webhook_fr import resolver_cnpj
+
+    mapa = settings_multi().segredos_webhook
+    assert resolver_cnpj(SEGREDOS_CNPJ[cnpj], mapa) == cnpj
+
+
+def test_segredo_desconhecido_nao_resolve_cnpj_nenhum() -> None:
+    from app.api.v1.webhook_fr import resolver_cnpj
+
+    assert resolver_cnpj("x" * 40, settings_multi().segredos_webhook) is None
+
+
+def test_segredo_avulso_continua_valendo_sem_cnpj() -> None:
+    """Compatibilidade: quem ja tinha o webhook no ar nao pode quebrar num deploy.
+
+    A operacao de CNPJ unico tambem cai aqui -- nao ha o que distinguir.
+    """
+    from app.api.v1.webhook_fr import resolver_cnpj
+
+    mapa = settings(fr_webhook_segredo=SEGREDO).segredos_webhook
+    assert resolver_cnpj(SEGREDO, mapa) == ""
+
+
+def test_segredo_repetido_entre_cnpjs_derruba_o_boot() -> None:
+    """Segredo duplicado tornaria a origem indeterminada -- que e o ponto inteiro.
+
+    E o modo de falha mais provavel: copiar a linha do .env e esquecer de trocar
+    o valor. Sem esta trava, dois CNPJs apareceriam como um so no painel.
+    """
+    with pytest.raises(ValueError, match="segredo repetido"):
+        settings_multi(
+            fr_webhook_segredos={"grudado": "g" * 40, "melhores": "g" * 40}
+        )
+
+
+def test_segredo_curto_em_um_cnpj_derruba_o_boot() -> None:
+    with pytest.raises(ValueError, match=r"FR_WEBHOOK_SEGREDOS\[melhores\]"):
+        settings_multi(
+            fr_webhook_segredos={"grudado": "g" * 40, "melhores": "curto"}
+        )
+
+
+def test_cnpj_chega_ao_registro_do_evento() -> None:
+    """Sem isto o relatorio nao consegue denunciar um cadastro que emudeceu."""
+    import asyncio
+
+    from app.services.eventos import ChaveEvento
+
+    registrados: list[str | None] = []
+
+    class EventosEspiao(EventosMemoria):
+        async def registrar(
+            self,
+            chave: ChaveEvento,
+            grupo: Grupo,
+            status: StatusEvento,
+            erro: str | None = None,
+            cnpj: str | None = None,
+        ) -> None:
+            registrados.append(cnpj)
+            await super().registrar(chave, grupo, status, erro, cnpj)
+
+    svc = ServicoNotificacao(
+        shopify=ShopifyFalsa(pedido()),  # type: ignore[arg-type]
+        eventos=EventosEspiao(),
+        n8n=N8nFalso(),  # type: ignore[arg-type]
+        settings=settings_multi(),
+    )
+    # Codigo 3 = Entregue, fora dos gatilhos: cai no `registrar`.
+    evento = WebhookOcorrenciaFR.model_validate(payload(codigo=3))
+    asyncio.run(svc.processar(evento, cnpj="melhores"))
+
+    assert registrados == ["melhores"]
+
+
+def test_rota_devolve_o_cnpj_que_atendeu() -> None:
+    """O `curl` de verificacao precisa confirmar QUAL dos tres cadastros respondeu.
+
+    Colar a URL errada num dos tres e o erro mais facil de cometer no painel, e
+    sem isto ele so apareceria dias depois, no relatorio.
+    """
+    import os
+
+    from app.config import get_settings
+
+    os.environ["FR_WEBHOOK_SEGREDOS"] = json.dumps(SEGREDOS_CNPJ)
+    os.environ["FR_WEBHOOK_SEGREDO"] = ""
+    os.environ["NOTIFICACAO_GRUPOS"] = "aguardando_retirada,tentativa_falha"
+    os.environ["NOTIFICACAO_ATIVA"] = "false"
+    get_settings.cache_clear()
+
+    try:
+        app = criar_app()
+        app.state.servico_notificacao = ServicoNotificacao(
+            shopify=ShopifyFalsa(pedido()),  # type: ignore[arg-type]
+            eventos=EventosMemoria(),
+            n8n=N8nFalso(),  # type: ignore[arg-type]
+            settings=get_settings(),
+        )
+        with TestClient(app) as c:
+            r = c.post(
+                f"/api/v1/webhook/frete-rapido/{SEGREDOS_CNPJ['tudo']}",
+                json=payload(),
+            )
+    finally:
+        for chave in (
+            "FR_WEBHOOK_SEGREDOS",
+            "FR_WEBHOOK_SEGREDO",
+            "NOTIFICACAO_GRUPOS",
+            "NOTIFICACAO_ATIVA",
+        ):
+            os.environ.pop(chave, None)
+        get_settings.cache_clear()
+
+    assert r.status_code == 200
+    assert r.json()["cnpj"] == "tudo"
+
+
 def test_payload_invalido_e_rejeitado_sem_reenvio(cliente: TestClient) -> None:
     """422 nao esta na lista de reenvio da FR (408/429/5xx) -- e o certo:
     payload malformado nao melhora com repeticao."""

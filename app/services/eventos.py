@@ -49,11 +49,16 @@ class ChaveEvento:
 
 class RepositorioEventos(Protocol):
     async def reservar(
-        self, chave: ChaveEvento, grupo: Grupo
+        self, chave: ChaveEvento, grupo: Grupo, cnpj: str | None = None
     ) -> StatusEvento | None: ...
 
     async def registrar(
-        self, chave: ChaveEvento, grupo: Grupo, status: StatusEvento, erro: str | None = None
+        self,
+        chave: ChaveEvento,
+        grupo: Grupo,
+        status: StatusEvento,
+        erro: str | None = None,
+        cnpj: str | None = None,
     ) -> None: ...
 
     async def concluir(
@@ -74,7 +79,9 @@ class EventosMemoria:
     def __init__(self) -> None:
         self._linhas: dict[ChaveEvento, tuple[StatusEvento, datetime]] = {}
 
-    async def reservar(self, chave: ChaveEvento, grupo: Grupo) -> StatusEvento | None:
+    async def reservar(
+        self, chave: ChaveEvento, grupo: Grupo, cnpj: str | None = None
+    ) -> StatusEvento | None:
         existente = self._linhas.get(chave)
         if existente is not None:
             return existente[0]
@@ -82,7 +89,12 @@ class EventosMemoria:
         return None
 
     async def registrar(
-        self, chave: ChaveEvento, grupo: Grupo, status: StatusEvento, erro: str | None = None
+        self,
+        chave: ChaveEvento,
+        grupo: Grupo,
+        status: StatusEvento,
+        erro: str | None = None,
+        cnpj: str | None = None,
     ) -> None:
         self._linhas.setdefault(chave, (status, datetime.now(UTC)))
 
@@ -106,7 +118,9 @@ class EventosPostgres:
     def __init__(self, fabrica: async_sessionmaker[AsyncSession]) -> None:
         self._fabrica = fabrica
 
-    async def reservar(self, chave: ChaveEvento, grupo: Grupo) -> StatusEvento | None:
+    async def reservar(
+        self, chave: ChaveEvento, grupo: Grupo, cnpj: str | None = None
+    ) -> StatusEvento | None:
         """Reserva o evento. Devolve o status ja existente, ou `None` se e novo.
 
         `ON CONFLICT DO NOTHING` em vez de SELECT-depois-INSERT: a Frete Rapido
@@ -124,6 +138,7 @@ class EventosPostgres:
                     grupo=grupo.value,
                     status=StatusEvento.PENDENTE.value,
                     tentativas=1,
+                    cnpj=cnpj or None,
                 )
                 .on_conflict_do_nothing(constraint="uq_evento_frete_ocorrencia")
                 .returning(EventoFrete.id)
@@ -144,7 +159,12 @@ class EventosPostgres:
             return StatusEvento(bruto) if bruto else None
 
     async def registrar(
-        self, chave: ChaveEvento, grupo: Grupo, status: StatusEvento, erro: str | None = None
+        self,
+        chave: ChaveEvento,
+        grupo: Grupo,
+        status: StatusEvento,
+        erro: str | None = None,
+        cnpj: str | None = None,
     ) -> None:
         """Grava um desfecho ja decidido, sem reservar. Idempotente."""
         async with sessao(self._fabrica) as sess:
@@ -158,6 +178,7 @@ class EventosPostgres:
                     status=status.value,
                     tentativas=1,
                     erro=erro,
+                    cnpj=cnpj or None,
                 )
                 .on_conflict_do_nothing(constraint="uq_evento_frete_ocorrencia")
             )
