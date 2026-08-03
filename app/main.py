@@ -11,7 +11,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine
 
-from app.api.v1 import rastreio
+from app.api.v1 import rastreio, webhook_fr
 from app.config import Settings, get_settings
 from app.db.session import criar_engine, criar_fabrica
 from app.middleware.protecao import ProtecaoMiddleware
@@ -20,9 +20,11 @@ from app.services.auditoria import Auditoria
 from app.services.cache import Cache, CacheDesligado, CacheMemoria, CachePostgres
 from app.services.consulta import ServicoConsulta
 from app.services.demo import FreteRapidoDemo, ShopifyDemo, catalogo
+from app.services.eventos import EventosMemoria, EventosPostgres, RepositorioEventos
 from app.services.frete_rapido import ClienteFreteRapido
 from app.services.logs import instalar_redacao
 from app.services.multi_cnpj import BuscadorMultiCNPJ
+from app.services.notificacao import ServicoNotificacao
 from app.services.shopify import ClienteShopify
 
 logging.basicConfig(
@@ -59,20 +61,70 @@ def montar_servico(s: Settings, cache: Cache) -> ServicoConsulta:
     )
 
 
+def montar_notificacao(s: Settings, eventos: RepositorioEventos) -> ServicoNotificacao:
+    """Servico do webhook. Em DEMO_MODE usa a Shopify falsa, como o de consulta.
+
+    Os pedidos de demonstracao NAO tem telefone, de proposito: qualquer numero
+    plausivel que escrevessemos aqui pertence a alguem de verdade. Em DEMO_MODE
+    o webhook portanto sempre termina em `sem_contato` -- que e um desfecho
+    legitimo. Os demais caminhos sao exercitados pelos testes, onde o contato e
+    controlado.
+    """
+    if s.demo_mode:
+        return ServicoNotificacao(
+            shopify=ShopifyDemo(s.demo_email),  # type: ignore[arg-type]
+            eventos=eventos,
+            settings=s,
+        )
+    return ServicoNotificacao(shopify=ClienteShopify(), eventos=eventos, settings=s)
+
+
+def _registrar_gatilhos(s: Settings) -> None:
+    """Deixa a configuracao EFETIVA visivel em `docker compose logs`.
+
+    Sem isto, "quais status estao ativos agora" so se responde inspecionando o
+    `.env` do servidor -- e um aviso que deixou de sair nao deixa rastro nenhum
+    para denunciar a configuracao errada.
+    """
+    if not s.webhook_fr_habilitado:
+        logger.info("webhook da Frete Rapido DESLIGADO (FR_WEBHOOK_SEGREDO vazio)")
+        return
+
+    logger.info(
+        "webhook da Frete Rapido ativo | envio=%s | grupos=%s | extra=%s | "
+        "ignorados=%s | teto=%d aviso(s)/%dh",
+        "LIGADO" if s.notificacao_ativa else "DESLIGADO (modo observacao)",
+        sorted(g.value for g in s.grupos_notificaveis) or "(nenhum)",
+        sorted(s.codigos_extra) or "(nenhum)",
+        sorted(s.codigos_ignorados) or "(nenhum)",
+        s.notificacao_max_por_pedido,
+        s.notificacao_janela_horas,
+    )
+
+
 @asynccontextmanager
 async def ciclo_de_vida(app: FastAPI) -> AsyncIterator[None]:
     s = get_settings()
+
+    # Reinstalado aqui, e nao apenas no import: quando rodamos sob uvicorn, os
+    # handlers DELE sao criados fora do nosso controle e podem nascer depois do
+    # import deste modulo. Este ponto executa com o logging ja inteiro montado.
+    # E o `uvicorn.access` e justamente quem registra o caminho da requisicao,
+    # onde viaja o segredo do webhook.
+    instalar_redacao()
 
     # O banco e opcional: sem ele a API responde normalmente, apenas sem
     # auditoria e com cache em memoria. Preferimos servir o cliente a exigir
     # infraestrutura completa para funcionar.
     fabrica = None
     cache: Cache = CacheMemoria()
+    eventos: RepositorioEventos = EventosMemoria()
     if s.database_url:
         try:
             engine = criar_engine(s.database_url)
             fabrica = criar_fabrica(engine)
             cache = CachePostgres(fabrica)
+            eventos = EventosPostgres(fabrica)
             app.state.engine = engine
         except Exception as exc:
             logger.error("banco indisponivel, seguindo sem auditoria: %s", exc)
@@ -83,11 +135,16 @@ async def ciclo_de_vida(app: FastAPI) -> AsyncIterator[None]:
 
     limite, janela = interpretar_limite(s.rate_limit)
     app.state.limitador = LimitadorJanelaDeslizante(limite, janela)
+    limite_wh, janela_wh = interpretar_limite(s.rate_limit_webhook)
+    app.state.limitador_webhook = LimitadorJanelaDeslizante(limite_wh, janela_wh)
 
     # Nao sobrescreve um servico ja injetado: e assim que os testes (e o modo
     # demonstracao) substituem as integracoes reais.
     if getattr(app.state, "servico_consulta", None) is None:
         app.state.servico_consulta = montar_servico(s, cache)
+
+    if getattr(app.state, "servico_notificacao", None) is None:
+        app.state.servico_notificacao = montar_notificacao(s, eventos)
 
     logger.info(
         "API iniciada (env=%s, Shopify=%s, fuso FR=%s, CNPJs=%s, limite=%s, banco=%s)",
@@ -98,6 +155,7 @@ async def ciclo_de_vida(app: FastAPI) -> AsyncIterator[None]:
         s.rate_limit,
         "sim" if fabrica else "nao",
     )
+    _registrar_gatilhos(s)
     yield
 
     motor: AsyncEngine | None = getattr(app.state, "engine", None)
@@ -162,6 +220,9 @@ def criar_app() -> FastAPI:
     )
 
     app.include_router(rastreio.router)
+    # A rota so responde com FR_WEBHOOK_SEGREDO configurado; sem ele devolve 404
+    # como qualquer caminho inexistente.
+    app.include_router(webhook_fr.router)
 
     @app.get("/health", include_in_schema=False)
     async def health() -> dict[str, str]:

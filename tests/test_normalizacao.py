@@ -13,6 +13,8 @@ from app.services.normalizacao import (
     NumeroPedidoFR,
     montar_name_shopify,
     normalizar_email,
+    normalizar_telefone_br,
+    primeiro_nome,
     truncar,
 )
 
@@ -136,3 +138,85 @@ def test_truncar() -> None:
     assert truncar("a" * 600, 512) == "a" * 512
     assert truncar("curto", 512) == "curto"
     assert truncar(None, 512) is None
+
+
+# --------------------------------------------------------------------------
+# Telefone -- o aviso proativo por WhatsApp
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("entrada", "esperado"),
+    [
+        ("11999998888", "+5511999998888"),          # forma nua
+        ("(11) 99999-8888", "+5511999998888"),      # como a Shopify costuma devolver
+        ("+55 11 99999-8888", "+5511999998888"),    # ja internacional
+        ("5511999998888", "+5511999998888"),        # com DDI, sem "+"
+        ("011999998888", "+5511999998888"),         # prefixo de discagem nacional
+        ("11 9 9999-8888", "+5511999998888"),       # nono digito separado
+        ("\u00a011999998888 ", "+5511999998888"),      # espaco nao-separavel de copiar/colar
+        ("21999998888", "+5521999998888"),
+    ],
+)
+def test_telefone_valido_vira_e164(entrada: str, esperado: str) -> None:
+    assert normalizar_telefone_br(entrada) == esperado
+
+
+@pytest.mark.parametrize(
+    "entrada",
+    [
+        None,
+        "",
+        "   ",
+        "1133334444",        # fixo: nao existe WhatsApp em telefone fixo
+        "(11) 3333-4444",    # idem, formatado
+        "999998888",         # sem DDD: nao da para adivinhar
+        "1199999888",        # 10 digitos comecando com 9: nem fixo nem celular
+        # "00" e discagem INTERNACIONAL: sem o codigo 55 depois dele, nao e
+        # Brasil. Um `lstrip("0")` cru transformaria isto num celular plausivel.
+        "0099999888899",
+        "+1 415 555 2671",   # numero estrangeiro
+        "+11999998888",      # codigo de pais 1 (EUA), nao DDD 11
+        "11999998888 ramal 22",
+        "nao-e-telefone",
+        "1099999888 8",      # DDD 10 nao existe
+        "3099999888 8",      # DDD 30 nao existe
+    ],
+)
+def test_telefone_inutilizavel_devolve_none(entrada: str | None) -> None:
+    """`None` nao e falha: e a resposta correta para "nao da para avisar"."""
+    assert normalizar_telefone_br(entrada) is None
+
+
+def test_celular_antigo_de_oito_digitos_e_RECUSADO() -> None:
+    """Prefixar o nono digito seria INVENTAR informacao.
+
+    O numero resultante e plausivel e pode pertencer a outra pessoa -- e o custo
+    do erro aqui nao e uma consulta vazia, e mandar dados de um pedido para um
+    desconhecido. A taxa de `sem_contato` mostra se isso importa na pratica.
+    """
+    assert normalizar_telefone_br("1199998888") is None
+
+
+def test_ddd_55_nao_e_confundido_com_codigo_do_pais() -> None:
+    """55 e o DDD de Santa Maria/RS. Decidir por prefixo erraria um dos dois casos."""
+    # 11 digitos: 55 e DDD, e o numero e celular.
+    assert normalizar_telefone_br("55999998888") == "+5555999998888"
+    # 13 digitos: 55 e codigo do pais, o DDD e 11.
+    assert normalizar_telefone_br("5511999998888") == "+5511999998888"
+
+
+@pytest.mark.parametrize(
+    ("entrada", "esperado"),
+    [
+        ("Daniel", "Daniel"),
+        ("Daniel Silva Souza", "Daniel"),
+        ("  Ana  Maria ", "Ana"),
+        (None, None),
+        ("", None),
+        ("   ", None),
+    ],
+)
+def test_primeiro_nome(entrada: str | None, esperado: str | None) -> None:
+    """Minimizacao: o nome completo nao acrescenta nada a "sua encomenda chegou"."""
+    assert primeiro_nome(entrada) == esperado

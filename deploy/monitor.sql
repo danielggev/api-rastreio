@@ -144,3 +144,95 @@ SELECT count(*)                                                AS registros,
        min(criado_em AT TIME ZONE 'America/Sao_Paulo')          AS mais_antigo,
        now()::date - min(criado_em)::date                       AS dias
 FROM consulta_log;
+
+\echo
+\echo ##########################################################
+\echo  WEBHOOK DA FRETE RAPIDO -- avisos proativos
+\echo ##########################################################
+\echo  Os tres primeiros relatorios existem para decidir a
+\echo  configuracao com DADO, nao com palpite. Rode-os depois de
+\echo  uma a duas semanas com NOTIFICACAO_ATIVA=false.
+\echo
+\echo  Legenda de status:
+\echo    descartado  = fora dos gatilhos (o caso comum)
+\echo    observado   = TERIA sido enviado; envio desligado
+\echo    sem_contato = pedido sem telefone utilizavel
+\echo    pendente    = falhou; a FR esta reenviando
+\echo    enviado     = mensagem entregue ao n8n
+
+\echo
+\echo ==========================================================
+\echo  9. QUE OCORRENCIAS DE FATO CHEGAM -- 30 dias
+\echo ==========================================================
+\echo  E ESTA a tabela que define NOTIFICACAO_GRUPOS. O catalogo
+\echo  da FR tem ~350 codigos; sua operacao usa uma fracao.
+\echo  Escolha os gatilhos pelo que aparece aqui.
+
+SELECT grupo,
+       codigo,
+       count(*)                                        AS eventos,
+       count(DISTINCT numero_pedido)                   AS pedidos,
+       max(recebido_em AT TIME ZONE 'America/Sao_Paulo') AS ultimo
+FROM evento_frete
+WHERE recebido_em > now() - interval '30 days'
+GROUP BY grupo, codigo
+ORDER BY eventos DESC;
+
+\echo
+\echo ==========================================================
+\echo  10. VOLUME QUE TERIA SIDO ENVIADO -- por dia
+\echo ==========================================================
+\echo  Dimensiona o custo do WhatsApp ANTES de ligar o envio.
+\echo  A soma de observado + enviado e o volume real da Fase 2.
+
+SELECT (recebido_em AT TIME ZONE 'America/Sao_Paulo')::date AS dia,
+       count(*)                                             AS eventos,
+       count(*) FILTER (WHERE status = 'observado')          AS observado,
+       count(*) FILTER (WHERE status = 'enviado')            AS enviado,
+       count(*) FILTER (WHERE status = 'sem_contato')        AS sem_contato,
+       count(*) FILTER (WHERE status = 'descartado')         AS descartado,
+       count(*) FILTER (WHERE status = 'pendente')           AS pendente
+FROM evento_frete
+WHERE recebido_em > now() - interval '30 days'
+GROUP BY dia
+ORDER BY dia DESC;
+
+\echo
+\echo ==========================================================
+\echo  11. TAXA DE sem_contato -- vale buscar o telefone na FR?
+\echo ==========================================================
+\echo  Denominador = eventos que passaram pelos gatilhos, ou seja
+\echo  os que TENTARIAM avisar alguem. Taxa alta significa que o
+\echo  telefone da Shopify nao basta, e ai compensa implementar a
+\echo  segunda fonte (GET quote/{id_frete} na Frete Rapido).
+
+SELECT count(*)                                          AS candidatos,
+       count(*) FILTER (WHERE status = 'sem_contato')     AS sem_contato,
+       round(
+           100.0 * count(*) FILTER (WHERE status = 'sem_contato')
+           / nullif(count(*), 0),
+           1
+       )                                                  AS taxa_pct
+FROM evento_frete
+WHERE recebido_em > now() - interval '30 days'
+  AND status IN ('observado', 'enviado', 'sem_contato');
+
+\echo
+\echo ==========================================================
+\echo  12. AVISOS PRESOS -- a FR ja desistiu de reenviar
+\echo ==========================================================
+\echo  A escada de reentrega da FR dura ~24h. Linha em pendente
+\echo  alem disso significa que o aviso NAO saiu e ninguem soube:
+\echo  olhar a coluna erro. Vazio aqui e o estado saudavel.
+
+SELECT numero_pedido,
+       codigo,
+       grupo,
+       tentativas,
+       recebido_em AT TIME ZONE 'America/Sao_Paulo' AS recebido,
+       erro
+FROM evento_frete
+WHERE status = 'pendente'
+  AND recebido_em < now() - interval '24 hours'
+ORDER BY recebido_em DESC
+LIMIT 50;

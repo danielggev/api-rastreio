@@ -51,6 +51,27 @@ class Resultado(StrEnum):
     ERRO_EXTERNO = "erro_externo"
 
 
+class StatusEvento(StrEnum):
+    """Desfecho de uma ocorrencia recebida por webhook da Frete Rapido.
+
+    Os tres primeiros sao TERMINAIS e respondem HTTP 200 -- a Frete Rapido nao
+    deve reenviar. Insistir num evento que nunca podera ser entregue so gastaria
+    as 12 tentativas da escada de reentrega dela.
+    """
+
+    # Fora dos gatilhos configurados. O caso comum: "Em transito", "Entregue".
+    DESCARTADO = "descartado"
+    # Dispararia, mas NOTIFICACAO_ATIVA=false. E o estado que mede o volume real
+    # antes de ligar o envio.
+    OBSERVADO = "observado"
+    # Pedido existe, mas nao ha telefone utilizavel. Terminal, nao falha.
+    SEM_CONTATO = "sem_contato"
+
+    # Deveria ter sido enviado e nao foi: a resposta e 503 e a FR reenvia.
+    PENDENTE = "pendente"
+    ENVIADO = "enviado"
+
+
 class Anomalia(StrEnum):
     """Situacoes que nao quebram a resposta mas precisam ficar visiveis."""
 
@@ -137,6 +158,109 @@ class OcorrenciaFR(BaseModel):
     def descricao(self) -> str | None:
         """`descricao_ocorrencia` com fallback para `mensagem`."""
         return self.descricao_ocorrencia or self.mensagem
+
+
+class TransportadoraWebhook(BaseModel):
+    """Transportadora como vem no webhook. Dado de EMPRESA, nao pessoal.
+
+    O `cnpj` fica de fora por nao ter uso: o que a mensagem precisa e o nome
+    comercial. `razao_social` entra apenas como entrada do mapa de
+    `services/transportadora.py`, para quando `nome_fantasia` vier vazio.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    nome_fantasia: str | None = None
+    razao_social: str | None = None
+
+    @field_validator("nome_fantasia", "razao_social", mode="before")
+    @classmethod
+    def _limitar(cls, v: Any) -> Any:
+        if isinstance(v, str) and len(v) > MAX_TEXTO_EXTERNO:
+            return v[:MAX_TEXTO_EXTERNO]
+        return v
+
+
+class WebhookOcorrenciaFR(BaseModel):
+    """Uma ocorrencia recebida por PUSH da Frete Rapido.
+
+    Mesma disciplina de lista de permissao do `OcorrenciaFR`, e aqui ela pesa
+    ainda mais: no fluxo de polling somos nos que pedimos os dados, enquanto
+    aqui um terceiro nos ENTREGA um payload nao assinado. Tudo que nao esta
+    declarado abaixo morre no parsing, antes de qualquer gravacao.
+
+    Descartados de proposito:
+
+    - `comprovantes[].url_imagem` -- imagem de canhoto, com assinatura de quem
+      recebeu: dado pessoal de terceiro.
+    - `notas_fiscais[]` -- a chave de acesso da NF-e identifica emitente,
+      destinatario e valor. Nada disso entra numa mensagem de "va buscar sua
+      encomenda".
+    - `metadados[]` -- pares chave/valor arbitrarios preenchidos pelo ERP.
+      Justamente por serem arbitrarios nao ha como saber o que trazem.
+    - `canal`, `numero_pedido_pai`, `prazo_original_transportador` -- sem uso.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    numero_pedido: str = Field(min_length=1, max_length=64)
+    codigo: int
+
+    # Identificador do frete na FR. NAO vai para o cliente (nao e rastreavel na
+    # transportadora -- ver `RespostaSucesso`), mas e a chave de correlacao com
+    # o `trackingInfo.number` do fulfillment da Shopify e com o endpoint
+    # `quote/{id_frete}`.
+    id_frete: str | None = None
+
+    nome: str | None = None
+    mensagem: str | None = None
+    data_ocorrencia: datetime | None = None
+    data_atualizacao: datetime | None = None
+
+    # Deliberadamente `str`, e nao `date`: nunca observamos este campo
+    # preenchido -- a documentacao mostra `null`. Declarar `date` faria o
+    # parsing FALHAR no primeiro payload real que trouxesse "2026-08-12
+    # 00:00:00" em vez de "2026-08-12", derrubando o aviso justamente no caso
+    # que mais importa. Quem formata a data e o n8n.
+    prazo_devolucao: str | None = None
+    prazo_entrega_consumidor: str | None = None
+
+    rastreio: str | None = None
+    transportadora: TransportadoraWebhook | None = None
+
+    @field_validator(
+        "nome",
+        "mensagem",
+        "prazo_devolucao",
+        "prazo_entrega_consumidor",
+        "rastreio",
+        "id_frete",
+        mode="before",
+    )
+    @classmethod
+    def _limitar_texto_externo(cls, v: Any) -> Any:
+        """Mesmo teto do `OcorrenciaFR`: texto de terceiro nao entra sem limite."""
+        if isinstance(v, str) and len(v) > MAX_TEXTO_EXTERNO:
+            return v[:MAX_TEXTO_EXTERNO]
+        return v
+
+    @field_validator("codigo", mode="before")
+    @classmethod
+    def _codigo_int_ou_string(cls, v: Any) -> Any:
+        """A documentacao mostra inteiro; o polling ja mostrou as duas formas."""
+        if isinstance(v, str):
+            limpo = v.strip()
+            if not limpo.isdigit():
+                raise ValueError(f"codigo de ocorrencia nao numerico: {v!r}")
+            return int(limpo)
+        return v
+
+    @property
+    def nome_transportadora(self) -> str | None:
+        """Nome comercial, com a razao social como segunda opcao."""
+        if self.transportadora is None:
+            return None
+        return self.transportadora.nome_fantasia or self.transportadora.razao_social
 
 
 # --------------------------------------------------------------------------

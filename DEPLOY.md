@@ -408,3 +408,100 @@ FROM consulta_log
 WHERE criado_em > now() - interval '1 hour'
 GROUP BY resultado ORDER BY 2 DESC;
 ```
+
+---
+
+## Webhook da Frete Rápido — aviso proativo
+
+Duas fases. **Não pule a Fase 1**: é ela que transforma a escolha dos gatilhos
+numa decisão informada, e ela não fala com cliente nenhum.
+
+### Fase 1 — modo observação
+
+**1. Gerar o segredo.** Ele é a única barreira: a Frete Rápido não assina o
+payload.
+
+```bash
+python -c "import secrets; print(secrets.token_urlsafe(32))"
+```
+
+**2. Configurar no `.env`** (envio desligado de propósito):
+
+```bash
+FR_WEBHOOK_SEGREDO=<o valor gerado acima>
+NOTIFICACAO_ATIVA=false
+NOTIFICACAO_GRUPOS=aguardando_retirada,tentativa_falha
+```
+
+**3. Subir e migrar:**
+
+```bash
+docker compose --env-file .env -f deploy/docker-compose.traefik.yml up -d --build
+docker compose --env-file .env -f deploy/docker-compose.traefik.yml exec api alembic upgrade head
+```
+
+Confirme nos logs a linha que declara a configuração efetiva — é assim que se
+responde "quais status estão ativos agora" sem abrir o `.env` do servidor:
+
+```
+webhook da Frete Rapido ativo | envio=DESLIGADO (modo observacao) | grupos=[...]
+```
+
+**4. Testar antes de cadastrar na Frete Rápido:**
+
+```bash
+curl -i -X POST "https://$API_DOMINIO/api/v1/webhook/frete-rapido/$FR_WEBHOOK_SEGREDO" \
+  -H 'Content-Type: application/json' \
+  -d @tests/fixtures/webhook-ocorrencia-232.json
+```
+
+Espere `200` com `{"status":"observado",...}`. Segredo errado devolve `404`.
+
+**5. Confirmar que o segredo não vaza no log** — se aparecer em claro, a camada
+de segurança principal está furada:
+
+```bash
+docker compose --env-file .env -f deploy/docker-compose.traefik.yml logs api | grep 'frete-rapido'
+# deve mostrar /webhook/frete-rapido/***
+```
+
+**6. Cadastrar a URL no Dash FR.** Não há API para isso. Como a operação usa **3
+CNPJs**, confirme com o suporte se a configuração é por CNPJ ou por conta, e se
+os três podem apontar para a mesma URL. Aproveite e peça as **faixas de IP de
+origem** — com elas dá para fechar a rota no Traefik, que é a camada de segurança
+mais forte disponível.
+
+**7. Deixar rodando de uma a duas semanas** e então:
+
+```bash
+./deploy/monitor.sh
+```
+
+Os relatórios 9 a 12 respondem, com dado real: quais ocorrências de fato chegam
+(→ define `NOTIFICACAO_GRUPOS`), quantas mensagens sairiam por dia (→ dimensiona
+o custo) e qual a taxa de `sem_contato` (→ decide se vale buscar o telefone na
+própria Frete Rápido como segunda fonte).
+
+### Fase 2 — ligar o envio
+
+1. Montar o fluxo no n8n e apontar `N8N_WEBHOOK_URL` + `N8N_WEBHOOK_TOKEN`
+2. Ajustar `NOTIFICACAO_GRUPOS` conforme os dados da Fase 1
+3. Alinhar a retenção do n8n (`EXECUTIONS_DATA_MAX_AGE`) com os 90 dias daqui —
+   o telefone do cliente fica retido lá, fora do `scripts/expurgar.py`
+4. Usar o **reprocessamento manual do Dash FR** para reenviar uma ocorrência real
+   e acompanhar o caminho inteiro
+5. Só então `NOTIFICACAO_ATIVA=true`, com `NOTIFICACAO_MAX_POR_PEDIDO` baixo nos
+   primeiros dias
+
+**Interruptor de emergência:** `NOTIFICACAO_ATIVA=false` + `restart api`. Os
+eventos continuam sendo gravados; nada é enviado.
+
+### O que observar
+
+| Sinal | Significado |
+|---|---|
+| `sem_contato` alto | O telefone da Shopify não basta — avaliar a segunda fonte (`GET quote/{id_frete}`) |
+| `pendente` há mais de 24 h | A Frete Rápido esgotou as 12 tentativas e o aviso **não saiu**. Ver a coluna `erro` |
+| `limite anti-spam` no log | Rajada de códigos no mesmo pedido, ou segredo vazado |
+| `webhook para pedido inexistente` | Webhook forjado, ou pedido com mais de 60 dias (some da API da Shopify) |
+| 429 na rota do webhook | `RATE_LIMIT_WEBHOOK` baixo demais. A FR reenvia, mas o aviso atrasa |

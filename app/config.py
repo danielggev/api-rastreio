@@ -12,7 +12,33 @@ from typing import Literal
 from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from app.schemas import Grupo
+
 Ambiente = Literal["development", "staging", "production"]
+
+# Comprimento minimo do segredo do webhook. A Frete Rapido NAO assina o payload:
+# o segredo na URL e a unica barreira que impede qualquer um de postar
+# ocorrencias falsas. 32 caracteres de `secrets.token_urlsafe` sao inadivinhaveis.
+MIN_SEGREDO_WEBHOOK = 32
+
+
+def _codigos(bruto: str) -> frozenset[int]:
+    """Lista de codigos de ocorrencia separada por virgula.
+
+    Recusa o que nao for numero em vez de descartar em silencio: um
+    `NOTIFICACAO_CODIGOS_IGNORADOS=232;140` (ponto e virgula por engano) que
+    virasse conjunto vazio voltaria a notificar um codigo que alguem desligou de
+    proposito.
+    """
+    valores: set[int] = set()
+    for parte in bruto.split(","):
+        limpo = parte.strip()
+        if not limpo:
+            continue
+        if not limpo.isdigit():
+            raise ValueError(f"codigo de ocorrencia nao numerico: {limpo!r}")
+        valores.add(int(limpo))
+    return frozenset(valores)
 
 
 class Settings(BaseSettings):
@@ -52,6 +78,35 @@ class Settings(BaseSettings):
     # origem, nao conversao. PENDENTE de confirmacao com o fornecedor.
     frete_rapido_timezone: str = "America/Sao_Paulo"
 
+    # --- Webhook da Frete Rapido / notificacao proativa ---
+    # A FR nao assina o webhook: o segredo vai no CAMINHO da URL e e comparado
+    # com `compare_digest`. Vazio desliga a rota por completo.
+    fr_webhook_segredo: str = ""
+
+    # Interruptor geral do ENVIO. Com `false` a API percorre o caminho inteiro
+    # -- recebe, filtra, classifica, deduplica, resolve o pedido na Shopify --
+    # e grava o resultado SEM enviar nada. E o modo de observacao: serve para
+    # medir quais ocorrencias de fato acontecem e quantos pedidos tem telefone
+    # utilizavel, antes de falar com cliente de verdade.
+    notificacao_ativa: bool = False
+
+    # Grupos que disparam mensagem, separados por virgula. O grupo -- e nao o
+    # codigo -- e o nivel certo de configuracao: ele ja e o conceito de negocio
+    # curado em `services/ocorrencias.py`.
+    notificacao_grupos: str = ""
+    # Valvulas de escape por codigo, para o caso pontual que o grupo nao resolve.
+    notificacao_codigos_extra: str = ""
+    notificacao_codigos_ignorados: str = ""
+
+    # Trava anti-spam. Uma transportadora que posta cinco codigos em sequencia
+    # nao pode virar cinco mensagens -- e um segredo vazado nao pode virar mil.
+    notificacao_max_por_pedido: int = 3
+    notificacao_janela_horas: int = 6
+
+    # --- n8n (entrega da mensagem) ---
+    n8n_webhook_url: str = ""
+    n8n_webhook_token: str = ""
+
     # --- Banco ---
     database_url: str = ""
     email_hmac_key: str = ""
@@ -60,6 +115,10 @@ class Settings(BaseSettings):
     cors_origins: str = ""
     trusted_proxies: str = "127.0.0.1"
     rate_limit: str = "10/minute"
+    # Limite proprio do webhook: trafego de servidor, nao de navegador. O de
+    # cliente (10/minuto) faria a Frete Rapido levar 429 numa rajada normal de
+    # ocorrencias.
+    rate_limit_webhook: str = "300/minute"
 
     # --- Demonstracao ---
     demo_mode: bool = False
@@ -104,6 +163,36 @@ class Settings(BaseSettings):
             return {"": self.frete_rapido_token}
         return {}
 
+    @property
+    def grupos_notificaveis(self) -> frozenset[Grupo]:
+        """Grupos configurados para disparar mensagem.
+
+        Valores invalidos NAO sao ignorados aqui -- o validador de boot recusa a
+        subida. Silenciar um erro de digitacao desligaria as notificacoes sem
+        ninguem perceber, que e exatamente o modo de falha que este projeto
+        evita em todo lugar.
+        """
+        return frozenset(
+            Grupo(g.strip().casefold())
+            for g in self.notificacao_grupos.split(",")
+            if g.strip()
+        )
+
+    @property
+    def codigos_extra(self) -> frozenset[int]:
+        """Codigos que disparam mesmo fora dos grupos configurados."""
+        return _codigos(self.notificacao_codigos_extra)
+
+    @property
+    def codigos_ignorados(self) -> frozenset[int]:
+        """Codigos que nunca disparam, mesmo dentro de um grupo configurado."""
+        return _codigos(self.notificacao_codigos_ignorados)
+
+    @property
+    def webhook_fr_habilitado(self) -> bool:
+        """A rota so existe com segredo configurado."""
+        return bool(self.fr_webhook_segredo)
+
     @model_validator(mode="after")
     def _validar(self) -> Settings:
         # Trava de seguranca: servir dados falsos a clientes reais e pior do que
@@ -139,10 +228,72 @@ class Settings(BaseSettings):
                     f"configuracao obrigatoria ausente: {', '.join(faltando)}"
                 )
 
+        self._validar_notificacao()
+
         if self.producao:
             self._exigir_producao()
 
         return self
+
+    def _validar_notificacao(self) -> None:
+        """Recusa configuracao de notificacao invalida, mesmo fora de producao.
+
+        Tudo aqui falha FECHADO. Um grupo escrito errado
+        (`aguardando_retira`) que virasse conjunto vazio desligaria os avisos em
+        silencio -- e ninguem descobre um aviso que nao foi enviado.
+        """
+        problemas: list[str] = []
+
+        try:
+            grupos = self.grupos_notificaveis
+        except ValueError:
+            validos = ", ".join(sorted(g.value for g in Grupo))
+            problemas.append(
+                f"NOTIFICACAO_GRUPOS contem grupo inexistente "
+                f"({self.notificacao_grupos!r}). Validos: {validos}"
+            )
+            grupos = frozenset()
+
+        for nome, bruto in (
+            ("NOTIFICACAO_CODIGOS_EXTRA", self.notificacao_codigos_extra),
+            ("NOTIFICACAO_CODIGOS_IGNORADOS", self.notificacao_codigos_ignorados),
+        ):
+            try:
+                _codigos(bruto)
+            except ValueError as exc:
+                problemas.append(f"{nome}: {exc}")
+
+        if self.notificacao_ativa:
+            # Ligar o envio sem ter o que enviar, para onde enviar, ou sem a
+            # barreira que protege a rota e sempre engano de configuracao.
+            if not grupos and not self.codigos_extra:
+                problemas.append(
+                    "NOTIFICACAO_ATIVA=true sem NOTIFICACAO_GRUPOS nem "
+                    "NOTIFICACAO_CODIGOS_EXTRA: nada dispararia mensagem"
+                )
+            if not self.n8n_webhook_url:
+                problemas.append("NOTIFICACAO_ATIVA=true exige N8N_WEBHOOK_URL")
+            if not self.fr_webhook_segredo:
+                problemas.append("NOTIFICACAO_ATIVA=true exige FR_WEBHOOK_SEGREDO")
+
+        # O segredo e a UNICA barreira da rota: a Frete Rapido nao assina o
+        # payload. Curto demais e adivinhavel.
+        if self.fr_webhook_segredo and len(self.fr_webhook_segredo) < MIN_SEGREDO_WEBHOOK:
+            problemas.append(
+                f"FR_WEBHOOK_SEGREDO curto demais (minimo {MIN_SEGREDO_WEBHOOK} "
+                "caracteres; gere com `python -c \"import secrets; "
+                'print(secrets.token_urlsafe(32))"`)'
+            )
+
+        if self.notificacao_max_por_pedido < 1:
+            problemas.append("NOTIFICACAO_MAX_POR_PEDIDO deve ser >= 1")
+        if self.notificacao_janela_horas < 1:
+            problemas.append("NOTIFICACAO_JANELA_HORAS deve ser >= 1")
+
+        if problemas:
+            raise ValueError(
+                "configuracao de notificacao invalida: " + "; ".join(problemas)
+            )
 
     def _exigir_producao(self) -> None:
         """Rejeita configuracao que apenas PARECE preenchida.

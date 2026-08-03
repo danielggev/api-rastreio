@@ -34,6 +34,8 @@ from app.services.normalizacao import (
     NumeroPedidoFR,
     montar_name_shopify,
     normalizar_email,
+    normalizar_telefone_br,
+    primeiro_nome,
 )
 from app.services.reintento import Permanente, Politica, Transitorio, com_reintento
 from app.services.shopify_auth import GerenciadorTokenShopify, ShopifyAutenticacaoErro
@@ -55,6 +57,13 @@ query BuscarPedido($query: String!, $primeiros: Int!) {
       displayFulfillmentStatus
       # Identifica qual dos 3 CNPJs despachou -- escolhe o token da Frete Rapido.
       tags
+      # Contato para o aviso proativo de "va buscar sua encomenda". Tres fontes
+      # porque nenhuma e obrigatoria: o telefone do endereco de entrega e o mais
+      # confiavel (foi digitado para a transportadora usar), o do cadastro vem
+      # depois, e o do pedido por ultimo.
+      phone
+      shippingAddress { phone }
+      customer { phone firstName }
       fulfillments(first: 10) {
         createdAt
         trackingInfo { number url company }
@@ -88,6 +97,13 @@ class PedidoShopify:
     # qual CNPJ despachou o pedido.
     tags: list[str] = field(default_factory=list)
     anomalias: list[Anomalia] = field(default_factory=list)
+
+    # Contato para o aviso proativo. NUNCA persistidos: sao lidos aqui, passados
+    # ao n8n e descartados -- as tabelas do projeto seguem sem dado pessoal em
+    # repouso. `telefone` ja vem em E.164, ou `None` quando nao ha numero
+    # utilizavel para WhatsApp.
+    telefone: str | None = None
+    nome_cliente: str | None = None
 
     def email_confere(self, informado: str | None) -> bool:
         """Comparacao entre formas canonicas.
@@ -311,6 +327,23 @@ class ClienteShopify:
             brutas = brutas.split(",")
         tags = [t.strip().casefold() for t in brutas if isinstance(t, str) and t.strip()]
 
+        cliente = no.get("customer") or {}
+        entrega = no.get("shippingAddress") or {}
+
+        # Primeiro numero das tres fontes que resulte num celular valido -- e
+        # NAO o primeiro que estiver preenchido. Um fixo no endereco de entrega
+        # nao pode impedir que o celular do cadastro seja usado: nao existe
+        # WhatsApp em telefone fixo, e a mensagem simplesmente nao chegaria.
+        telefone: str | None = None
+        for candidato in (
+            entrega.get("phone"),
+            cliente.get("phone"),
+            no.get("phone"),
+        ):
+            telefone = normalizar_telefone_br(candidato)
+            if telefone:
+                break
+
         return PedidoShopify(
             id=str(no.get("id") or ""),
             name=str(no.get("name") or numero),
@@ -320,4 +353,6 @@ class ClienteShopify:
             codigo_rastreio=codigo_rastreio,
             tags=tags,
             anomalias=anomalias,
+            telefone=telefone,
+            nome_cliente=primeiro_nome(cliente.get("firstName")),
         )

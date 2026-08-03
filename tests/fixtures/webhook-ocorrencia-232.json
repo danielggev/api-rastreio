@@ -1,0 +1,36 @@
+{
+  "id_frete": "FR260723D6KTG",
+  "numero_pedido": "59552",
+  "numero_pedido_pai": "",
+  "canal": "ecommerce",
+  "codigo": 232,
+  "nome": "Disponivel para retirada nos Correios",
+  "data_ocorrencia": "2026-08-03 15:37:12",
+  "data_atualizacao": "2026-08-03 15:40:01",
+  "data_reentrega": null,
+  "prazo_devolucao": "2026-08-12",
+  "mensagem": "Objeto aguardando retirada na agencia AC CENTRO",
+  "comprovantes": [
+    { "url_imagem": "https://exemplo.freterapido.com/canhoto/abc123.jpg" }
+  ],
+  "notas_fiscais": [
+    {
+      "numero": "123456",
+      "serie": "1",
+      "chave_acesso": "35260712345678000199550010001234561234567890",
+      "data_emissao": "2026-07-23"
+    }
+  ],
+  "metadados": [
+    { "chave": "cpf_destinatario", "valor": "123.456.789-00" },
+    { "chave": "pedido_erp", "valor": "ERP-99887" }
+  ],
+  "transportadora": {
+    "cnpj": "34028316000103",
+    "razao_social": "EMPRESA BRASILEIRA DE CORREIOS E TELEGRAFOS",
+    "nome_fantasia": "Correios"
+  },
+  "rastreio": "AA123456789BR",
+  "prazo_entrega_consumidor": "2026-08-05",
+  "prazo_original_transportador": "2026-08-04"
+}
