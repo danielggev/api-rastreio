@@ -492,6 +492,98 @@ def test_segredo_errado_responde_404(cliente: TestClient) -> None:
     assert r.status_code == 404
 
 
+# --------------------------------------------------------------------------
+# Bearer token -- a segunda barreira, configurada no Dash FR
+# --------------------------------------------------------------------------
+
+BEARER = "b" * 48
+
+
+@pytest.fixture
+def cliente_com_bearer() -> Iterator[TestClient]:
+    import os
+
+    with _app(FR_WEBHOOK_BEARER=BEARER) as c:
+        yield c
+    for chave in (
+        "FR_WEBHOOK_SEGREDO",
+        "FR_WEBHOOK_BEARER",
+        "NOTIFICACAO_GRUPOS",
+        "NOTIFICACAO_ATIVA",
+    ):
+        os.environ.pop(chave, None)
+    from app.config import get_settings
+
+    get_settings.cache_clear()
+
+
+def test_bearer_correto_passa(cliente_com_bearer: TestClient) -> None:
+    r = cliente_com_bearer.post(
+        ROTA, json=payload(), headers={"Authorization": f"Bearer {BEARER}"}
+    )
+
+    assert r.status_code == 200
+
+
+def test_bearer_ausente_responde_404_mesmo_com_segredo_certo(
+    cliente_com_bearer: TestClient,
+) -> None:
+    """As duas barreiras sao independentes: uma nao substitui a outra."""
+    r = cliente_com_bearer.post(ROTA, json=payload())
+
+    assert r.status_code == 404
+
+
+def test_bearer_errado_responde_404(cliente_com_bearer: TestClient) -> None:
+    r = cliente_com_bearer.post(
+        ROTA, json=payload(), headers={"Authorization": f"Bearer {'z' * 48}"}
+    )
+
+    assert r.status_code == 404
+
+
+@pytest.mark.parametrize(
+    "cabecalho",
+    [
+        "bearer {token}",  # o padrao HTTP nao diferencia caixa no esquema
+        "BEARER {token}",
+        "Bearer  {token}",  # espaco extra
+    ],
+)
+def test_bearer_tolera_variacoes_de_forma(
+    cliente_com_bearer: TestClient, cabecalho: str
+) -> None:
+    """Recusar por causa da caixa daria uma falha confusa, sem ganho nenhum."""
+    r = cliente_com_bearer.post(
+        ROTA,
+        json=payload(),
+        headers={"Authorization": cabecalho.format(token=BEARER)},
+    )
+
+    assert r.status_code == 200
+
+
+@pytest.mark.parametrize(
+    "cabecalho",
+    ["", "Basic dXNlcjpwYXNz", BEARER, f"Token {BEARER}", "Bearer"],
+)
+def test_bearer_recusa_esquema_errado(
+    cliente_com_bearer: TestClient, cabecalho: str
+) -> None:
+    r = cliente_com_bearer.post(
+        ROTA, json=payload(), headers={"Authorization": cabecalho}
+    )
+
+    assert r.status_code == 404
+
+
+def test_sem_bearer_configurado_o_cabecalho_e_ignorado(cliente: TestClient) -> None:
+    """Compatibilidade: quem so usa o segredo da URL nao quebra."""
+    r = cliente.post(ROTA, json=payload())
+
+    assert r.status_code == 200
+
+
 def test_payload_invalido_e_rejeitado_sem_reenvio(cliente: TestClient) -> None:
     """422 nao esta na lista de reenvio da FR (408/429/5xx) -- e o certo:
     payload malformado nao melhora com repeticao."""

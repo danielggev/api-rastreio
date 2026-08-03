@@ -83,6 +83,15 @@ class Settings(BaseSettings):
     # com `compare_digest`. Vazio desliga a rota por completo.
     fr_webhook_segredo: str = ""
 
+    # Bearer token exigido no cabecalho `Authorization`. O painel da Frete
+    # Rapido tem campo proprio para isto -- a documentacao publica nao menciona,
+    # mas o formulario de cadastro oferece Basic, Bearer e headers avulsos.
+    #
+    # E mecanismo MELHOR que o segredo no caminho: cabecalho nao aparece em log
+    # de acesso, nem em `Referer`, nem no historico de proxy. Usamos os dois, e
+    # ambos precisam bater.
+    fr_webhook_bearer: str = ""
+
     # Interruptor geral do ENVIO. Com `false` a API percorre o caminho inteiro
     # -- recebe, filtra, classifica, deduplica, resolve o pedido na Shopify --
     # e grava o resultado SEM enviar nada. E o modo de observacao: serve para

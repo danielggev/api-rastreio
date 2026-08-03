@@ -507,11 +507,48 @@ docker compose --env-file .env -f deploy/docker-compose.traefik.yml logs api | g
 # deve mostrar /webhook/frete-rapido/***
 ```
 
-**6. Cadastrar a URL no Dash FR.** Não há API para isso. Como a operação usa **3
-CNPJs**, confirme com o suporte se a configuração é por CNPJ ou por conta, e se
-os três podem apontar para a mesma URL. Aproveite e peça as **faixas de IP de
-origem** — com elas dá para fechar a rota no Traefik, que é a camada de segurança
-mais forte disponível.
+**6. Cadastrar a URL no Dash FR.** Não há API para isso — é o formulário
+"Cadastro de Webhook", com três abas. Faça **só depois** dos passos 4 e 5: a
+Frete Rápido **não reenvia em 404**, então eventos que chegarem antes do deploy
+são perdidos em silêncio.
+
+> A documentação pública diz que não há autenticação. **Tem.** O formulário
+> oferece Basic (usuário/senha), Bearer token e headers avulsos. Verificado no
+> painel em 03/08/2026.
+
+*Aba **URL***
+
+| Campo | Valor |
+|---|---|
+| Nome | `Ocorrencias - rastreio` (livre) |
+| Webhook | `https://SEU_DOMINIO/api/v1/webhook/frete-rapido/<FR_WEBHOOK_SEGREDO>` |
+| Tipo | **Ocorrência** |
+| Usuário / Senha | vazio |
+| Bearer token | o valor de `FR_WEBHOOK_BEARER` |
+
+*Aba **Headers*** — deixar vazia. O Bearer da aba URL já cobre; header avulso
+seria uma terceira barreira sem ganho.
+
+*Aba **Configurações de Disparo*** — duas decisões que não são óbvias:
+
+- **Lista de ocorrências: deixar TUDO desmarcado.** O próprio painel avisa que
+  sem filtro "o disparo será enviado considerando todos os cenários", e é
+  exatamente isso que a Fase 1 precisa. Marcar as ocorrências aqui **cegaria a
+  medição**: o relatório 9 do `monitor.sql` existe para mostrar o que de fato
+  acontece, e ele só mostraria o que você já tivesse pré-selecionado — circular
+  e inútil. Depois da Fase 1 dá para estreitar aqui, se o volume incomodar.
+- **"Incluir fretes do tipo reversa?": deixar DESLIGADO.** Frete reverso é a
+  mercadoria voltando *para a loja*. Uma reversa em estado "disponível para
+  retirada" é a **loja** que precisa buscar — e o aviso iria para o cliente,
+  dizendo para ele retirar um pacote que está voltando. Os códigos de reversa já
+  caem no grupo `devolucao`, que não dispara; desligar aqui é a segunda camada
+  contra uma mensagem constrangedora.
+- **Canal: deixar vazio** — vazio significa todos os canais.
+
+Como a operação usa **3 CNPJs**, confirme com o suporte se o cadastro é por CNPJ
+ou por conta, e se os três podem apontar para a mesma URL. Aproveite e peça as
+**faixas de IP de origem** — com elas dá para fechar a rota no Traefik, a camada
+de segurança mais forte disponível.
 
 **7. Deixar rodando de uma a duas semanas** e então:
 
