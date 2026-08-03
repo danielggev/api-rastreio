@@ -444,6 +444,20 @@ O restante da Fase 1 pode seguir em paralelo: o modo observação funciona mesmo
 sem telefone nenhum — os eventos entram como `sem_contato`, o que já é a
 medição.
 
+> **Medido em 03/08/2026** na loja real, 250 pedidos despachados dos últimos 30
+> dias: **98,8% com telefone utilizável**, todos vindos de
+> `shippingAddress.phone`. As 3 exceções foram 2 números estrangeiros e 1 campo
+> vazio. Nome do cliente disponível em 99,6%.
+>
+> **A segunda fonte na Frete Rápido não é necessária.** E o app **não** precisa
+> de *protected customer data* nem de `read_customers` — o `read_orders` que ele
+> já tem alcança o `shippingAddress`.
+>
+> Isso vale enquanto a consulta **não** pedir `customer { … }`. Esse campo exige
+> `read_customers`, e a Shopify nega a *consulta inteira* com `ACCESS_DENIED` —
+> derrubando junto a página de rastreio, que é o fluxo principal. Há teste de
+> regressão para isso em `tests/test_shopify.py`.
+
 ### Fase 1 — modo observação
 
 **1. Gerar o segredo.** Ele é a única barreira: a Frete Rápido não assina o

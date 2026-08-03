@@ -57,13 +57,19 @@ query BuscarPedido($query: String!, $primeiros: Int!) {
       displayFulfillmentStatus
       # Identifica qual dos 3 CNPJs despachou -- escolhe o token da Frete Rapido.
       tags
-      # Contato para o aviso proativo de "va buscar sua encomenda". Tres fontes
-      # porque nenhuma e obrigatoria: o telefone do endereco de entrega e o mais
-      # confiavel (foi digitado para a transportadora usar), o do cadastro vem
-      # depois, e o do pedido por ultimo.
+      # Contato para o aviso proativo de "va buscar sua encomenda".
+      #
+      # A fonte e o ENDERECO DE ENTREGA, nao o cadastro do cliente. Nao e
+      # preferencia: `customer { phone firstName }` exige o escopo
+      # `read_customers`, que este app nao tem -- e a Shopify responde
+      # ACCESS_DENIED para a CONSULTA INTEIRA, derrubando junto o rastreio, que
+      # e o fluxo principal. Verificado em 03/08/2026 contra a loja real.
+      #
+      # Nao ha perda: em toda a amostra o endereco de entrega trazia telefone e
+      # nome, e faz sentido -- e o contato que o cliente informa exatamente para
+      # a entrega acontecer.
       phone
-      shippingAddress { phone }
-      customer { phone firstName }
+      shippingAddress { phone firstName }
       fulfillments(first: 10) {
         createdAt
         trackingInfo { number url company }
@@ -351,19 +357,14 @@ class ClienteShopify:
             brutas = brutas.split(",")
         tags = [t.strip().casefold() for t in brutas if isinstance(t, str) and t.strip()]
 
-        cliente = no.get("customer") or {}
         entrega = no.get("shippingAddress") or {}
 
-        # Primeiro numero das tres fontes que resulte num celular valido -- e
-        # NAO o primeiro que estiver preenchido. Um fixo no endereco de entrega
-        # nao pode impedir que o celular do cadastro seja usado: nao existe
-        # WhatsApp em telefone fixo, e a mensagem simplesmente nao chegaria.
+        # Primeiro numero que resulte num celular valido -- e NAO o primeiro que
+        # estiver preenchido. Um fixo no endereco de entrega nao pode impedir
+        # que o telefone do pedido seja usado: nao existe WhatsApp em telefone
+        # fixo, e a mensagem simplesmente nao chegaria.
         telefone: str | None = None
-        for candidato in (
-            entrega.get("phone"),
-            cliente.get("phone"),
-            no.get("phone"),
-        ):
+        for candidato in (entrega.get("phone"), no.get("phone")):
             telefone = normalizar_telefone_br(candidato)
             if telefone:
                 break
@@ -378,5 +379,5 @@ class ClienteShopify:
             tags=tags,
             anomalias=anomalias,
             telefone=telefone,
-            nome_cliente=primeiro_nome(cliente.get("firstName")),
+            nome_cliente=primeiro_nome(entrega.get("firstName")),
         )

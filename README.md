@@ -131,6 +131,13 @@ viram `sem_contato` em vez de ganharem um nono dígito na marra. Inventar o díg
 produz um número plausível que pode ser de outra pessoa — e aqui o custo do erro
 não é uma consulta vazia, é mandar dados de um pedido para um desconhecido.
 
+**O contato vem do endereço de entrega, não do cadastro do cliente.** Não é
+preferência: `customer { phone firstName }` exige o escopo `read_customers`, e a
+Shopify não devolve o campo como nulo — ela nega a **consulta inteira** com
+`ACCESS_DENIED`, o que derrubaria a página de rastreio junto. O `shippingAddress`
+traz telefone e nome, cobre 98,8% dos pedidos despachados (medido em 03/08/2026)
+e não precisa de escopo novo. `tests/test_shopify.py` tem a regressão.
+
 **`sem_contato` responde 200, não 503.** É desfecho terminal, não falha: insistir
 gastaria as 12 tentativas da Frete Rápido num evento que nunca poderá ser
 entregue. O 503 fica reservado para o que *vale* reenviar — Shopify ou n8n fora

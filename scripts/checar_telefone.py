@@ -50,6 +50,11 @@ ALERTA = "[!]"
 # cresce com o tamanho da pagina -- 100 e o meio-termo confortavel.
 POR_PAGINA = 100
 
+# A consulta e a MESMA do caminho de producao (`shopify.CONSULTA`): tira o
+# telefone e o nome do ENDERECO DE ENTREGA, nao do cadastro do cliente.
+#
+# `customer { phone firstName }` exigiria o escopo `read_customers`, que este
+# app nao tem -- e a Shopify nega a CONSULTA INTEIRA, nao so o campo.
 AMOSTRA = """
 query AmostraDeContato($primeiros: Int!, $cursor: String, $busca: String!) {
   orders(first: $primeiros, after: $cursor, query: $busca,
@@ -60,8 +65,7 @@ query AmostraDeContato($primeiros: Int!, $cursor: String, $busca: String!) {
       createdAt
       displayFulfillmentStatus
       phone
-      shippingAddress { phone }
-      customer { phone firstName }
+      shippingAddress { phone firstName }
     }}
   }
 }
@@ -145,11 +149,9 @@ def relatar(nos: list[dict[str, Any]]) -> int:
 
     for no in nos:
         entrega = no.get("shippingAddress") or {}
-        cliente = no.get("customer") or {}
 
         candidatos = (
             ("shippingAddress.phone", entrega.get("phone")),
-            ("customer.phone", cliente.get("phone")),
             ("order.phone", no.get("phone")),
         )
         if any(v for _, v in candidatos):
@@ -165,7 +167,7 @@ def relatar(nos: list[dict[str, Any]]) -> int:
             preenchida = next((v for _, v in candidatos if v), None)
             motivos[classificar_falha(preenchida)] += 1
 
-        if not (cliente.get("firstName") or "").strip():
+        if not (entrega.get("firstName") or "").strip():
             sem_nome += 1
 
     pct = 100.0 * usaveis / total
@@ -234,15 +236,28 @@ async def principal() -> int:
     try:
         nos = await coletar(args.dias, args.maximo)
     except ShopifyAcessoNegado as exc:
+        detalhe = redigir_excecao(exc)
         print(f"\n  {FALHA} ACESSO NEGADO pela Shopify.")
-        print(f"      {redigir_excecao(exc)}")
-        print("\n      Causa mais provavel: PROTECTED CUSTOMER DATA.")
-        print("      `phone`, `firstName` e `shippingAddress` exigem aprovacao")
-        print("      separada do escopo `read_orders`.")
-        print("\n      Shopify admin > Apps > seu app > API access >")
-        print("      'Protected customer data access' > solicitar.")
-        print("\n      Enquanto isso nao sair, o aviso proativo precisa buscar o")
-        print("      telefone na Frete Rapido (`GET quote/{id_frete}`).")
+        # A mensagem e truncada porque a Shopify repete o mesmo erro uma vez por
+        # pedido da pagina -- 100 linhas identicas escondem o que importa.
+        print(f"      {detalhe[:300]}")
+
+        # Sao dois problemas diferentes, com solucoes diferentes, e confundi-los
+        # custa dias esperando uma aprovacao que nao era necessaria.
+        if "read_customers" in detalhe:
+            print("\n      Causa: falta o ESCOPO `read_customers`.")
+            print("      Nao e protected customer data -- e escopo comum.")
+            print("\n      Mas nem precisa dele: o telefone e o nome saem do")
+            print("      `shippingAddress`, que o `read_orders` ja alcanca.")
+            print("      Se esta mensagem apareceu, a consulta deste script")
+            print("      divergiu de `app/services/shopify.py`. Realinhe as duas.")
+        else:
+            print("\n      Causa provavel: PROTECTED CUSTOMER DATA -- telefone,")
+            print("      nome e endereco exigem aprovacao separada do escopo.")
+            print("\n      Shopify admin > Apps > seu app > API access >")
+            print("      'Protected customer data access' > solicitar.")
+            print("\n      Enquanto isso nao sair, o aviso proativo precisa buscar")
+            print("      o telefone na Frete Rapido (`GET quote/{id_frete}`).")
         return 1
     except ShopifyErro as exc:
         print(f"\n  {FALHA} {redigir_excecao(exc)}")

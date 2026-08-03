@@ -12,6 +12,7 @@ from app.schemas import Anomalia
 from app.services.normalizacao import NumeroPedidoFR
 from app.services.reintento import Politica
 from app.services.shopify import (
+    CONSULTA,
     ClienteShopify,
     ShopifyAcessoNegado,
     ShopifyErro,
@@ -300,3 +301,74 @@ def test_escapar_busca() -> None:
     assert escapar_busca('a"b') == 'a\\"b'
     assert escapar_busca("a\\b") == "a\\\\b"
     assert escapar_busca("#59552") == "#59552"
+
+
+# --------------------------------------------------------------------------
+# Contato para o aviso proativo
+# --------------------------------------------------------------------------
+
+
+def test_consulta_nao_pede_campos_que_exigem_read_customers() -> None:
+    """REGRESSAO de um bug que derrubaria o fluxo PRINCIPAL, nao so o webhook.
+
+    Ao adicionar a busca de telefone, a primeira versao pediu
+    `customer { phone firstName }`. Esse campo exige o escopo `read_customers`,
+    que este app nao tem -- e a Shopify nao devolve o campo como null: ela nega
+    a CONSULTA INTEIRA com ACCESS_DENIED. Como `_checar_erros_graphql` falha
+    fechado, TODA consulta de rastreio passaria a responder erro.
+
+    Verificado em 03/08/2026 contra a loja real. O `shippingAddress` traz
+    telefone e nome e nao precisa de escopo novo.
+    """
+    # Só a parte EXECUTAVEL: os comentarios da query citam `customer` justamente
+    # para explicar por que ele nao esta la.
+    executavel = "\n".join(
+        linha.split("#", 1)[0] for linha in CONSULTA.splitlines()
+    )
+
+    assert "customer" not in executavel, (
+        "campos de `customer` exigem read_customers e derrubam a consulta inteira"
+    )
+    assert "shippingAddress" in executavel
+
+
+@respx.mock
+async def test_extrai_telefone_e_nome_do_endereco_de_entrega() -> None:
+    pedido = _pedido()
+    pedido["shippingAddress"] = {"phone": "(11) 99999-8888", "firstName": "Daniel"}
+    respx.post(URL).mock(return_value=httpx.Response(200, json=_corpo([pedido])))
+
+    encontrado = await _cliente().buscar_pedido(NumeroPedidoFR("59552", **LOJA))
+
+    assert encontrado is not None
+    # Ja normalizado em E.164: quem chama nao precisa saber de DDI nem de DDD.
+    assert encontrado.telefone == "+5511999998888"
+    assert encontrado.nome_cliente == "Daniel"
+
+
+@respx.mock
+async def test_telefone_fixo_no_endereco_cai_para_o_do_pedido() -> None:
+    """Fixo nao recebe WhatsApp: preenchido nao e o mesmo que utilizavel."""
+    pedido = _pedido()
+    pedido["shippingAddress"] = {"phone": "(11) 3333-4444", "firstName": "Ana"}
+    pedido["phone"] = "+5521988887777"
+    respx.post(URL).mock(return_value=httpx.Response(200, json=_corpo([pedido])))
+
+    encontrado = await _cliente().buscar_pedido(NumeroPedidoFR("59552", **LOJA))
+
+    assert encontrado is not None
+    assert encontrado.telefone == "+5521988887777"
+
+
+@respx.mock
+async def test_pedido_sem_telefone_utilizavel_nao_quebra_a_consulta() -> None:
+    """O rastreio e o fluxo principal: falta de contato nao pode derruba-lo."""
+    pedido = _pedido()
+    pedido["shippingAddress"] = {"phone": None, "firstName": None}
+    respx.post(URL).mock(return_value=httpx.Response(200, json=_corpo([pedido])))
+
+    encontrado = await _cliente().buscar_pedido(NumeroPedidoFR("59552", **LOJA))
+
+    assert encontrado is not None
+    assert encontrado.telefone is None
+    assert encontrado.nome_cliente is None
