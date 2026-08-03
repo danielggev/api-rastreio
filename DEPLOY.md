@@ -416,6 +416,34 @@ GROUP BY resultado ORDER BY 2 DESC;
 Duas fases. **Não pule a Fase 1**: é ela que transforma a escolha dos gatilhos
 numa decisão informada, e ela não fala com cliente nenhum.
 
+### Passo 0 — o telefone está disponível?
+
+**Faça isto antes de qualquer outra coisa.** É a pendência com mais chance de
+mudar o desenho, e leva um minuto:
+
+```bash
+.venv\Scripts\python.exe scripts/checar_telefone.py
+```
+
+Somente leitura — pode rodar contra produção. Ele mede a cobertura usando
+`normalizar_telefone_br`, a **mesma** função do caminho de produção, então o
+número que ele reporta é o número que você terá de verdade. Um levantamento por
+GraphiQL diria "preenchido", que é outra pergunta: fixo e celular antigo de 8
+dígitos não recebem WhatsApp.
+
+Dois desfechos exigem ação:
+
+- **`ACCESS_DENIED`, ou todos os telefones vindo nulos** → falta *protected
+  customer data*. Shopify admin → Apps → seu app → API access → "Protected
+  customer data access". Enquanto não sair, o telefone tem que vir da Frete
+  Rápido (`GET quote/{id_frete}`).
+- **Cobertura abaixo de ~60%** → só com a Shopify a maioria dos clientes ficaria
+  sem aviso. Implemente a segunda fonte antes de ligar o envio na Fase 2.
+
+O restante da Fase 1 pode seguir em paralelo: o modo observação funciona mesmo
+sem telefone nenhum — os eventos entram como `sem_contato`, o que já é a
+medição.
+
 ### Fase 1 — modo observação
 
 **1. Gerar o segredo.** Ele é a única barreira: a Frete Rápido não assina o

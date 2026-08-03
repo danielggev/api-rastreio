@@ -175,8 +175,32 @@ class ClienteShopify:
 
         return self._selecionar(corpo, numero)
 
+    async def consultar_bruto(
+        self, consulta: str, variaveis: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Executa uma consulta GraphQL arbitraria e devolve o corpo cru.
+
+        Existe para os scripts de diagnostico em `scripts/`, que precisam de
+        consultas que o fluxo do cliente nao faz -- amostragem de pedidos, por
+        exemplo. Reaproveita autenticacao, reintento e o tratamento de erro em
+        `errors` (a Shopify devolve HTTP 200 com falha no corpo).
+
+        NAO usar no caminho de requisicao do cliente: o `buscar_pedido` existe
+        justamente para que a consulta que decide autorizacao seja uma so.
+        """
+
+        async def chamar(timeout: float) -> dict[str, Any]:
+            return await self._executar(variaveis, timeout, consulta=consulta)
+
+        try:
+            return await com_reintento(chamar, self._politica, nome="Shopify GraphQL")
+        except ShopifyAcessoNegado:
+            raise
+        except (Transitorio, Permanente) as exc:
+            raise ShopifyErro(redigir_excecao(exc)) from None
+
     async def _executar(
-        self, variaveis: dict[str, Any], timeout: float
+        self, variaveis: dict[str, Any], timeout: float, consulta: str | None = None
     ) -> dict[str, Any]:
         try:
             token = await self._auth.obter()
@@ -189,7 +213,7 @@ class ClienteShopify:
             "X-Shopify-Access-Token": token,
             "Content-Type": "application/json",
         }
-        corpo_req = {"query": CONSULTA, "variables": variaveis}
+        corpo_req = {"query": consulta or CONSULTA, "variables": variaveis}
 
         try:
             if self._http is not None:
