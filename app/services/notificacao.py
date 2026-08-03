@@ -9,10 +9,13 @@ A ORDEM dos passos e normativa, como em `consulta.py`, e por motivos parecidos:
 2. **Deduplicar antes de agir.** A FR reenvia o mesmo evento ate 12 vezes em ~24h
    enquanto nao receber HTTP 200. Sem a reserva no banco, cada reentrega viraria
    uma mensagem nova -- o pior modo de falha deste projeto.
-3. **Resolver o pedido na Shopify antes de enviar qualquer coisa.** O webhook NAO
-   e assinado: o `numero_pedido` do payload e dado de origem nao confiavel. Isso
-   limita o estrago de um segredo vazado a "mensagem sobre um pedido real para o
-   dono real dele".
+3. **Confirmar o evento na propria Frete Rapido antes de tocar em dado do
+   cliente.** O webhook NAO e assinado: o segredo da URL prova que quem chamou o
+   conhece, nao que o evento aconteceu. So a Frete Rapido tem autoridade sobre
+   isso, e perguntar a ela nao depende de IP fixo nem de nada que o fornecedor
+   precise nos conceder.
+4. **Resolver o pedido na Shopify.** O `numero_pedido` do payload tambem e dado
+   de origem nao confiavel, e a Shopify e quem tem o contato do cliente.
 
 O desfecho `pendente` e o unico que responde 503, e isso e proposital: a escada
 de reentrega da propria Frete Rapido (1, 2, 3, 5, 10, 30 min, depois 1, 2, 3, 4,
@@ -31,6 +34,7 @@ from app.schemas import Grupo, StatusEvento, WebhookOcorrenciaFR
 from app.services.datas import atribuir_fuso
 from app.services.eventos import ChaveEvento, EventosMemoria, RepositorioEventos
 from app.services.logs import redigir_excecao
+from app.services.multi_cnpj import BuscadorMultiCNPJ
 from app.services.n8n import ClienteN8n, N8nErro
 from app.services.normalizacao import NumeroPedidoErro, NumeroPedidoFR, truncar
 from app.services.ocorrencias import classificar
@@ -68,11 +72,53 @@ class ServicoNotificacao:
         eventos: RepositorioEventos | None = None,
         n8n: ClienteN8n | None = None,
         settings: Settings | None = None,
+        frete_rapido: BuscadorMultiCNPJ | None = None,
     ) -> None:
         self._shopify = shopify
         self._eventos: RepositorioEventos = eventos or EventosMemoria()
         self._n8n = n8n or ClienteN8n()
         self._s = settings or get_settings()
+        # Usado para CONFIRMAR o evento na origem. Sem ele a verificacao e
+        # pulada -- o que so acontece em teste, ou com o interruptor desligado.
+        self._frete_rapido = frete_rapido
+
+    async def _confirmado_na_fonte(
+        self, numero: NumeroPedidoFR, codigo: int, cnpj: str | None
+    ) -> tuple[bool, str | None]:
+        """A Frete Rapido confirma que este pedido tem esta ocorrencia?
+
+        Devolve `(confirmado, motivo_da_falha)`. Falha de comunicacao e
+        confirmacao negativa sao coisas diferentes para quem chama, mas ambas
+        impedem o envio.
+
+        Casamos apenas o CODIGO, nao a data. Nao e concessao: a pergunta que
+        importa e "esta encomenda esta mesmo aguardando retirada AGORA?". Se a
+        Frete Rapido diz que sim, a mensagem e verdadeira -- independente de o
+        webhook ter sido genuino ou reproduzido por alguem. O dano que estamos
+        evitando e a mensagem FALSA, e casar so o codigo ja o elimina.
+        Exigir data exata acrescentaria pouco e criaria uma dependencia fragil
+        entre dois endpoints que podem formatar o instante de forma diferente --
+        se divergissem, NENHUM aviso sairia, e em silencio.
+        """
+        if self._frete_rapido is None:
+            return True, None
+
+        # A tag da consulta e o proprio CNPJ do cadastro: ja sabemos qual token
+        # usar, sem depender das tags da Shopify. Vazio cai no caminho seguro do
+        # buscador, que consulta todos em paralelo.
+        tags = [cnpj] if cnpj else []
+        try:
+            resultado = await self._frete_rapido.buscar(numero, tags)
+        except Exception as exc:
+            return False, truncar(redigir_excecao(exc), MAX_ERRO)
+
+        if resultado.houve_falha and not resultado.ocorrencias:
+            return False, "falha ao consultar a Frete Rapido para confirmar"
+
+        if any(o.codigo == codigo for o in resultado.ocorrencias):
+            return True, None
+
+        return False, f"ocorrencia {codigo} nao confirmada na Frete Rapido"
 
     # ------------------------------------------------------------------
     # Decisao de gatilho
@@ -156,7 +202,34 @@ class ServicoNotificacao:
             await self._eventos.concluir(chave, StatusEvento.DESCARTADO, motivo)
             return Desfecho(StatusEvento.DESCARTADO, grupo, motivo)
 
-        # 4. Shopify: e aqui que o payload nao confiavel encontra a realidade.
+        # 4. Confirmar na FONTE, antes de tocar em dado do cliente.
+        #
+        # A ordem importa em dois sentidos. Primeiro, seguranca: o segredo da URL
+        # prova que quem chamou o conhece, nao que o evento aconteceu -- so a
+        # Frete Rapido tem autoridade sobre isso. Segundo, privacidade: nao
+        # buscamos o telefone de ninguem com base num evento que ainda nao
+        # sabemos se e real.
+        #
+        # Nao confirmado vira PENDENTE, e nao descarte: o webhook pode chegar
+        # antes de a leitura refletir o evento, e a escada de reentrega da propria
+        # Frete Rapido (1, 2, 3, 5, 10 min...) resolve isso sozinha. Um evento
+        # forjado, esse sim, nunca confirma -- esgota as tentativas e fica
+        # visivel no relatorio 13 em vez de virar mensagem.
+        if self._s.notificacao_verificar_na_fonte:
+            confirmado, porque = await self._confirmado_na_fonte(
+                numero, evento.codigo, cnpj
+            )
+            if not confirmado:
+                logger.warning(
+                    "evento do pedido %s (codigo %s) nao confirmado na fonte: %s",
+                    numero,
+                    evento.codigo,
+                    porque,
+                )
+                await self._eventos.concluir(chave, StatusEvento.PENDENTE, porque)
+                return Desfecho(StatusEvento.PENDENTE, grupo, porque)
+
+        # 5. Shopify: e aqui que o payload nao confiavel encontra a realidade.
         try:
             pedido = await self._shopify.buscar_pedido(numero)
         except ShopifyErro as exc:
@@ -183,8 +256,9 @@ class ServicoNotificacao:
             await self._eventos.concluir(chave, StatusEvento.SEM_CONTATO)
             return Desfecho(StatusEvento.SEM_CONTATO, grupo)
 
-        # 5. Interruptor geral. Ate aqui tudo rodou de verdade -- inclusive a
-        # consulta a Shopify -- e e isso que da a medicao real da Fase 1.
+        # 6. Interruptor geral. Ate aqui tudo rodou de verdade -- inclusive a
+        # confirmacao na fonte e a consulta a Shopify -- e e isso que da a
+        # medicao real da Fase 1.
         if not self._s.notificacao_ativa:
             await self._eventos.concluir(chave, StatusEvento.OBSERVADO)
             logger.info(
@@ -195,7 +269,7 @@ class ServicoNotificacao:
             )
             return Desfecho(StatusEvento.OBSERVADO, grupo)
 
-        # 6. Entrega.
+        # 7. Entrega.
         payload = montar_payload(evento, grupo, pedido.telefone, pedido.nome_cliente)
         try:
             await self._n8n.enviar(payload)

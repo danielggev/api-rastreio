@@ -75,8 +75,17 @@ def montar_notificacao(s: Settings, eventos: RepositorioEventos) -> ServicoNotif
             shopify=ShopifyDemo(s.demo_email),  # type: ignore[arg-type]
             eventos=eventos,
             settings=s,
+            frete_rapido=FreteRapidoDemo(),  # type: ignore[arg-type]
         )
-    return ServicoNotificacao(shopify=ClienteShopify(), eventos=eventos, settings=s)
+    return ServicoNotificacao(
+        shopify=ClienteShopify(),
+        eventos=eventos,
+        settings=s,
+        # A MESMA instancia de busca do fluxo de consulta: confirmar o evento na
+        # fonte e exatamente a consulta que ja sabemos fazer, com o token do CNPJ
+        # certo e a politica de reintento ja calibrada.
+        frete_rapido=BuscadorMultiCNPJ(ClienteFreteRapido(), s.tokens_frete_rapido),
+    )
 
 
 def _registrar_gatilhos(s: Settings) -> None:
@@ -91,14 +100,16 @@ def _registrar_gatilhos(s: Settings) -> None:
         return
 
     logger.info(
-        "webhook da Frete Rapido ativo | envio=%s | grupos=%s | extra=%s | "
-        "ignorados=%s | teto=%d aviso(s)/%dh",
+        "webhook da Frete Rapido ativo | envio=%s | confirma na fonte=%s | "
+        "grupos=%s | extra=%s | ignorados=%s | teto=%d aviso(s)/%dh | CNPJs=%s",
         "LIGADO" if s.notificacao_ativa else "DESLIGADO (modo observacao)",
+        "sim" if s.notificacao_verificar_na_fonte else "NAO",
         sorted(g.value for g in s.grupos_notificaveis) or "(nenhum)",
         sorted(s.codigos_extra) or "(nenhum)",
         sorted(s.codigos_ignorados) or "(nenhum)",
         s.notificacao_max_por_pedido,
         s.notificacao_janela_horas,
+        sorted(c for c in s.segredos_webhook.values() if c) or "(segredo unico)",
     )
 
 

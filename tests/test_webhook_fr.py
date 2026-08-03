@@ -20,8 +20,9 @@ from fastapi.testclient import TestClient
 
 from app.config import Settings
 from app.main import criar_app
-from app.schemas import Grupo, StatusEvento, WebhookOcorrenciaFR
+from app.schemas import Grupo, OcorrenciaFR, StatusEvento, WebhookOcorrenciaFR
 from app.services.eventos import EventosMemoria
+from app.services.multi_cnpj import ResultadoBusca
 from app.services.normalizacao import NumeroPedidoFR
 from app.services.notificacao import ServicoNotificacao, montar_payload
 from app.services.shopify import PedidoShopify, ShopifyErro
@@ -66,6 +67,38 @@ class N8nFalso:
         self.enviados.append(payload)
 
 
+# Historico plausivel de um pedido, cobrindo os codigos usados nesta suite. E o
+# padrao NEUTRO: os testes que nao tratam de verificacao nao devem tropecar nela.
+# Quem testa a verificacao passa a propria lista.
+CONFIRMA_TUDO = [0, 15, 2, 3, 32, 232]
+
+
+class FreteRapidoFalso:
+    """Substitui o `BuscadorMultiCNPJ` na confirmacao do evento na fonte."""
+
+    def __init__(
+        self,
+        codigos: list[int] | None = None,
+        erro: Exception | None = None,
+        houve_falha: bool = False,
+    ) -> None:
+        self._codigos = CONFIRMA_TUDO if codigos is None else codigos
+        self._erro = erro
+        self._houve_falha = houve_falha
+        self.tags_recebidas: list[list[str]] = []
+
+    async def buscar(
+        self, numero: NumeroPedidoFR, tags: list[str] | None = None
+    ) -> ResultadoBusca:
+        self.tags_recebidas.append(list(tags or []))
+        if self._erro is not None:
+            raise self._erro
+        return ResultadoBusca(
+            ocorrencias=[OcorrenciaFR(codigo=c) for c in self._codigos],
+            houve_falha=self._houve_falha,
+        )
+
+
 def pedido(**kw: Any) -> PedidoShopify:
     base: dict[str, Any] = {
         "id": "gid://shopify/Order/1",
@@ -97,6 +130,7 @@ def servico(
     shopify: ShopifyFalsa | None = None,
     n8n: N8nFalso | None = None,
     s: Settings | None = None,
+    fr: FreteRapidoFalso | None = None,
 ) -> tuple[ServicoNotificacao, ShopifyFalsa, N8nFalso]:
     sh = shopify or ShopifyFalsa(pedido())
     fila = n8n or N8nFalso()
@@ -105,6 +139,7 @@ def servico(
         eventos=EventosMemoria(),
         n8n=fila,  # type: ignore[arg-type]
         settings=s or settings(),
+        frete_rapido=fr or FreteRapidoFalso(),  # type: ignore[arg-type]
     )
     return servico, sh, fila
 
@@ -365,6 +400,114 @@ async def test_n8n_fora_do_ar_pede_reenvio_e_depois_conclui() -> None:
 
     assert segunda.status is StatusEvento.ENVIADO
     assert segunda.status_http == 200
+
+
+# --------------------------------------------------------------------------
+# Confirmacao na fonte -- o webhook nao e assinado
+# --------------------------------------------------------------------------
+
+
+async def test_evento_confirmado_pela_frete_rapido_e_enviado() -> None:
+    desfecho, _, fila = await processar(payload(), fr=FreteRapidoFalso([0, 15, 232]))
+
+    assert desfecho.status is StatusEvento.ENVIADO
+    assert len(fila.enviados) == 1
+
+
+async def test_evento_NAO_confirmado_nao_vira_mensagem() -> None:
+    """O caso que a verificacao existe para cobrir.
+
+    O segredo da URL prova que quem chamou o conhece -- nao que o evento
+    aconteceu. Um payload forjado com codigo 232 mandaria o cliente a agencia
+    buscar um pacote que nao esta la.
+    """
+    desfecho, _, fila = await processar(
+        payload(), fr=FreteRapidoFalso([0, 15, 2])  # sem o 232
+    )
+
+    assert desfecho.status is StatusEvento.PENDENTE
+    assert fila.enviados == []
+    assert desfecho.detalhe is not None
+    assert "nao confirmada" in desfecho.detalhe
+
+
+async def test_nao_confirmado_e_PENDENTE_e_nao_descarte() -> None:
+    """O webhook pode chegar antes de a leitura refletir o evento.
+
+    Como `pendente` responde 503, a escada de reentrega da propria Frete Rapido
+    (1, 2, 3, 5, 10 min...) resolve o atraso de propagacao sozinha. Descartar
+    perderia um aviso legitimo por alguns segundos de diferenca.
+    """
+    desfecho, _, _ = await processar(payload(), fr=FreteRapidoFalso([2]))
+
+    assert desfecho.status_http == 503
+
+
+async def test_evento_forjado_nunca_toca_no_contato_do_cliente() -> None:
+    """Privacidade, nao so seguranca.
+
+    A confirmacao roda ANTES da Shopify: nao buscamos o telefone de ninguem com
+    base num evento que ainda nao sabemos se e real.
+    """
+    desfecho, sh, fila = await processar(payload(), fr=FreteRapidoFalso([2]))
+
+    assert desfecho.status is StatusEvento.PENDENTE
+    assert sh.chamadas == 0
+    assert fila.enviados == []
+
+
+async def test_frete_rapido_fora_do_ar_pede_reenvio() -> None:
+    from app.services.frete_rapido import FreteRapidoErro
+
+    desfecho, _, fila = await processar(
+        payload(), fr=FreteRapidoFalso(erro=FreteRapidoErro("indisponivel"))
+    )
+
+    assert desfecho.status is StatusEvento.PENDENTE
+    assert desfecho.status_http == 503
+    assert fila.enviados == []
+
+
+async def test_confirmacao_usa_o_token_do_cnpj_que_recebeu_o_evento() -> None:
+    """Ja sabemos o CNPJ pelo segredo da URL: nao dependemos da tag da Shopify."""
+    fr = FreteRapidoFalso()
+    svc, _, _ = servico(fr=fr)
+
+    await svc.processar(WebhookOcorrenciaFR.model_validate(payload()), cnpj="melhores")
+
+    assert fr.tags_recebidas == [["melhores"]]
+
+
+async def test_verificacao_desligada_pula_a_consulta() -> None:
+    """Interruptor de emergencia, caso as duas APIs deles divirjam algum dia."""
+    fr = FreteRapidoFalso([2])  # nao confirmaria
+    desfecho, _, fila = await processar(
+        payload(),
+        fr=fr,
+        s=settings(notificacao_verificar_na_fonte=False),
+    )
+
+    assert desfecho.status is StatusEvento.ENVIADO
+    assert len(fila.enviados) == 1
+    assert fr.tags_recebidas == []
+
+
+async def test_confirmacao_roda_antes_do_interruptor_de_envio() -> None:
+    """Na Fase 1 a verificacao TEM de rodar, senao a medicao mente.
+
+    Se ela so entrasse junto com o envio, o volume medido em observacao seria
+    maior que o real -- e a Fase 2 comecaria com expectativa errada.
+    """
+    fr = FreteRapidoFalso()
+    desfecho, _, fila = await processar(
+        payload(),
+        fr=fr,
+        s=settings(notificacao_ativa=False, n8n_webhook_url=""),
+    )
+
+    assert desfecho.status is StatusEvento.OBSERVADO
+    assert fila.enviados == []
+    assert fr.tags_recebidas == [[]]
 
 
 # --------------------------------------------------------------------------

@@ -127,6 +127,18 @@ class Settings(BaseSettings):
     notificacao_max_por_pedido: int = 3
     notificacao_janela_horas: int = 6
 
+    # Confirmar cada evento na PROPRIA Frete Rapido antes de avisar o cliente.
+    #
+    # O webhook nao e assinado: o segredo da URL prova que quem chamou conhece o
+    # segredo, nao que o evento aconteceu. Perguntar a fonte -- "este pedido tem
+    # mesmo esta ocorrencia?" -- transforma o payload de afirmacao em palpite a
+    # ser verificado, e nao depende de IP fixo nem de nada que o fornecedor
+    # precise nos conceder.
+    #
+    # Interruptor de emergencia: se algum dia as duas APIs deles divergirem, isto
+    # desliga a verificacao sem exigir deploy.
+    notificacao_verificar_na_fonte: bool = True
+
     # --- n8n (entrega da mensagem) ---
     n8n_webhook_url: str = ""
     n8n_webhook_token: str = ""

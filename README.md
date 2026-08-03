@@ -117,14 +117,24 @@ principal contra enumeração de pedidos.
 **CORS não é segurança.** Restringe apenas navegadores; qualquer script o ignora.
 A proteção real é o rate limiting mais a validação de email.
 
-**O webhook da Frete Rápido não é assinado.** Não há HMAC, cabeçalho assinado nem
-lista de IPs publicada na documentação deles. O segredo no caminho da URL é a
-única barreira — daí ele ser comparado com `compare_digest`, ter tamanho mínimo
-exigido no boot e ser redigido no log (o uvicorn registra o caminho de *toda*
-requisição). A segunda camada é tratar o payload como não-confiável: o
-`numero_pedido` é sempre resolvido contra a Shopify antes de qualquer envio, o
-que limita o estrago de um segredo vazado a "mensagem sobre um pedido real para o
-dono real dele".
+**O webhook da Frete Rápido não é assinado** — e a resposta a isso não é um
+segredo melhor, é verificar o dado.
+
+Não há HMAC nem lista de IPs publicada. Há dois segredos (o do caminho da URL e um
+Bearer token), mas ambos provam apenas que quem chamou *os conhece* — não que o
+evento aconteceu. Por isso, antes de mandar qualquer mensagem, a API **pergunta à
+própria Frete Rápido** se aquele pedido tem mesmo aquela ocorrência. Evento
+forjado não sobrevive à confirmação.
+
+Isso resolve o problema sem depender de IP fixo nem de nada que o fornecedor
+precise conceder, e de quebra pega erro de operação — URL trocada entre os três
+cadastros, número de pedido errado no payload.
+
+A confirmação roda **antes** da consulta à Shopify, o que é decisão de
+privacidade além de segurança: não buscamos o telefone de ninguém com base num
+evento que ainda não sabemos se é real. E "não confirmado" vira `pendente`, não
+descarte — se o webhook chegar antes de a leitura refletir o evento, a escada de
+reentrega deles resolve sozinha; um evento forjado, esse sim, nunca confirma.
 
 **Telefone é recusado, nunca "consertado".** Fixo e celular antigo de 8 dígitos
 viram `sem_contato` em vez de ganharem um nono dígito na marra. Inventar o dígito

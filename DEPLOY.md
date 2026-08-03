@@ -568,8 +568,15 @@ curl -s -X POST ".../frete-rapido/<SEGREDO_DO_CNPJ>" \
 
 Se o `cnpj` da resposta não for o esperado, a URL foi colada no cadastro errado.
 
-Aproveite o contato com o suporte e peça as **faixas de IP de origem** — com elas
-dá para fechar a rota no Traefik, a camada de segurança mais forte disponível.
+Aproveite o contato com o suporte e peça as **faixas de IP de origem**, se
+existirem. Mas trate como opcional: só vale fechar a rota no Traefik se elas
+forem **estáveis e documentadas**. O Traefik responde 403 a IP bloqueado, e 403
+não está na lista de reenvio da Frete Rápido — se eles trocarem de IP sem avisar,
+os eventos são **perdidos**, não adiados.
+
+A proteção que de fato resolve não depende deles: `NOTIFICACAO_VERIFICAR_NA_FONTE`
+faz a API confirmar cada evento na própria Frete Rápido antes de avisar o cliente.
+Um evento forjado não sobrevive à confirmação, e nada disso exige IP fixo.
 
 **7. Deixar rodando de uma a duas semanas** e então:
 
