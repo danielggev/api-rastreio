@@ -29,6 +29,7 @@ import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
+from uuid import uuid4
 
 from app.config import Settings, get_settings
 from app.schemas import Grupo, OcorrenciaFR, StatusEvento, WebhookOcorrenciaFR
@@ -143,15 +144,34 @@ class ServicoNotificacao:
         if atual.codigo == codigo:
             return Confirmacao(atual)
 
-        if any(o.codigo == codigo for o in resultado.ocorrencias):
+        candidatas = [o for o in resultado.ocorrencias if o.codigo == codigo]
+        if not candidatas:
+            return Confirmacao(None, f"ocorrencia {codigo} nao existe na Frete Rapido")
+
+        # "Existe mas nao e o atual" so vira DESFECHO TERMINAL com evidencia
+        # temporal de verdade. `ordenar_desc` e uma heuristica de APRESENTACAO:
+        # ocorrencia sem data vai para o fim da lista por convencao, nao porque
+        # se saiba que e antiga.
+        #
+        # Sem esta guarda, uma ocorrencia nova com `data_ocorrencia` nula (o
+        # schema aceita) seria empurrada para o fim, lida como historica,
+        # encerrada com 200 -- e um aviso legitimo se perderia em silencio.
+        mais_recente = max(
+            (o.data_ocorrencia for o in candidatas if o.data_ocorrencia), default=None
+        )
+        if atual.data_ocorrencia is None or mais_recente is None:
             return Confirmacao(
                 None,
-                f"ocorrencia {codigo} existe no historico mas o estado atual e "
-                f"{atual.codigo}: a encomenda seguiu adiante",
-                definitivo=True,
+                f"ocorrencia {codigo} nao e a atual, mas falta data para "
+                "estabelecer precedencia",
             )
 
-        return Confirmacao(None, f"ocorrencia {codigo} nao existe na Frete Rapido")
+        return Confirmacao(
+            None,
+            f"ocorrencia {codigo} existe no historico mas o estado atual e "
+            f"{atual.codigo}: a encomenda seguiu adiante",
+            definitivo=True,
+        )
 
     # ------------------------------------------------------------------
     # Decisao de gatilho
@@ -219,14 +239,19 @@ class ServicoNotificacao:
         #
         # A cota entra aqui, e nao depois, porque conta-la fora da transacao
         # deixava N corridas simultaneas verem zero e todas enviarem.
-        desde = datetime.now(UTC) - timedelta(hours=self._s.notificacao_janela_horas)
+        agora = datetime.now(UTC)
+        desde = agora - timedelta(hours=self._s.notificacao_janela_horas)
+        # Identidade deste processamento. E o que permite `concluir` recusar a
+        # escrita de um worker cujo lease ja venceu.
+        dono = uuid4().hex
         reserva = await self._eventos.adquirir(
             chave,
             grupo,
             cnpj=cnpj,
+            dono=dono,
             lease_s=self._s.notificacao_lease_s,
+            cooldown_s=self._s.notificacao_cooldown_s,
             desde=desde,
-            max_avisos=self._s.notificacao_max_por_pedido,
             max_tentativas=self._s.notificacao_max_tentativas_pedido,
         )
 
@@ -239,33 +264,31 @@ class ServicoNotificacao:
             )
             return Desfecho(reserva.status, grupo, "reentrega")
 
-        if reserva.em_andamento:
-            # Outro processo tem o lease. Encerrar com 200 e nao duplicar: quem
-            # esta com ele conclui, e um 503 so provocaria mais reentregas.
+        if reserva.em_andamento or reserva.em_espera:
+            # 503, e nao 200. HTTP 200 e TERMINAL para a Frete Rapido: ela para
+            # de tentar. Se o processo que detem o lease morrer depois disso, o
+            # lease expira e ninguem reassume -- nao ha fila local -- e o aviso
+            # some. Com 503 ela continua tentando: enquanto o dono estiver vivo
+            # as proximas veem o lease, e se ele morrer uma entrega posterior
+            # recupera o evento.
+            motivo = "em processamento" if reserva.em_andamento else "em espera"
             logger.info(
-                "evento do pedido %s (codigo %s) ja esta sendo processado",
+                "evento do pedido %s (codigo %s) %s",
                 numero,
                 evento.codigo,
+                motivo,
             )
-            return Desfecho(StatusEvento.DESCARTADO, grupo, "ja em processamento")
+            return Desfecho(StatusEvento.PENDENTE, grupo, motivo)
 
-        if reserva.cota_excedida:
-            if reserva.codigo_repetido:
-                # Nao e excesso, e repeticao do mesmo fato -- tipicamente uma
-                # ocorrencia por volume da remessa. Um pedido com 4 caixas
-                # geraria 4 avisos identicos "va buscar sua encomenda".
-                motivo = (
-                    f"ja avisado sobre o codigo {evento.codigo} deste pedido nas "
-                    f"ultimas {self._s.notificacao_janela_horas}h"
-                )
-            else:
-                motivo = (
-                    f"limite anti-spam: {reserva.avisos_recentes} aviso(s) e "
-                    f"{reserva.tentativas_recentes} tentativa(s) em "
-                    f"{self._s.notificacao_janela_horas}h"
-                )
-            logger.info("aviso contido para o pedido %s -- %s", numero, motivo)
-            await self._eventos.concluir(chave, StatusEvento.DESCARTADO, motivo)
+        if reserva.custo_excedido:
+            motivo = (
+                f"teto de tentativas do pedido: {reserva.tentativas_recentes} em "
+                f"{self._s.notificacao_janela_horas}h"
+            )
+            logger.warning("evento contido no pedido %s -- %s", numero, motivo)
+            await self._eventos.concluir(
+                chave, StatusEvento.DESCARTADO, motivo, dono=dono
+            )
             return Desfecho(StatusEvento.DESCARTADO, grupo, motivo)
 
         # 3. Confirmar na FONTE, antes de tocar em dado do cliente.
@@ -295,11 +318,43 @@ class ServicoNotificacao:
                     if conf.definitivo
                     else StatusEvento.PENDENTE
                 )
-                await self._eventos.concluir(chave, final, conf.motivo)
+                await self._eventos.concluir(chave, final, conf.motivo, dono=dono)
                 return Desfecho(final, grupo, conf.motivo)
             confirmada = conf.ocorrencia
 
-        # 4. Shopify: e aqui que o payload nao confiavel encontra a realidade.
+        # 4. Cota de MENSAGEM, so agora. Quando isto ficava junto da aquisicao do
+        # lease, tres eventos forjados simultaneos ocupavam as tres vagas antes
+        # de qualquer verificacao, e o evento legitimo que chegasse junto era
+        # descartado sem nunca ser consultado. So evento confirmado consome cota.
+        vaga = await self._eventos.reservar_aviso(
+            chave,
+            desde=desde,
+            desde_volume=agora
+            - timedelta(minutes=self._s.notificacao_janela_volume_min),
+            max_avisos=self._s.notificacao_max_por_pedido,
+        )
+        if not vaga.concedida:
+            if vaga.codigo_repetido:
+                # Nao e excesso, e repeticao do mesmo fato -- tipicamente uma
+                # ocorrencia por VOLUME da remessa. A janela aqui e curta de
+                # proposito: duas tentativas de entrega reais no mesmo dia sao
+                # dois fatos, e o cliente precisa saber dos dois.
+                motivo = (
+                    f"ja avisado sobre o codigo {evento.codigo} deste pedido nos "
+                    f"ultimos {self._s.notificacao_janela_volume_min} min"
+                )
+            else:
+                motivo = (
+                    f"limite anti-spam: {vaga.avisos_recentes} aviso(s) em "
+                    f"{self._s.notificacao_janela_horas}h"
+                )
+            logger.info("aviso contido para o pedido %s -- %s", numero, motivo)
+            await self._eventos.concluir(
+                chave, StatusEvento.DESCARTADO, motivo, dono=dono
+            )
+            return Desfecho(StatusEvento.DESCARTADO, grupo, motivo)
+
+        # 5. Shopify: e aqui que o payload nao confiavel encontra a realidade.
         try:
             pedido = await self._shopify.buscar_pedido(numero)
         except ShopifyErro as exc:
@@ -307,7 +362,9 @@ class ServicoNotificacao:
             # reenvia. E o caso em que o 503 vale a pena.
             falha = truncar(redigir_excecao(exc), MAX_ERRO)
             logger.error("falha na Shopify ao processar webhook: %s", falha)
-            await self._eventos.concluir(chave, StatusEvento.PENDENTE, falha)
+            await self._eventos.concluir(
+                chave, StatusEvento.PENDENTE, falha, dono=dono
+            )
             return Desfecho(StatusEvento.PENDENTE, grupo, falha)
 
         if pedido is None:
@@ -315,7 +372,10 @@ class ServicoNotificacao:
             # operacao, ou pedido antigo demais para a API da Shopify.
             logger.warning("webhook para pedido inexistente na Shopify: %s", numero)
             await self._eventos.concluir(
-                chave, StatusEvento.DESCARTADO, "pedido inexistente na Shopify"
+                chave,
+                StatusEvento.DESCARTADO,
+                "pedido inexistente na Shopify",
+                dono=dono,
             )
             return Desfecho(StatusEvento.DESCARTADO, grupo, "pedido inexistente")
 
@@ -323,14 +383,16 @@ class ServicoNotificacao:
             # Terminal, e nao falha: sem numero utilizavel nao ha o que reenviar.
             # A taxa disto e o que decide se vale buscar o telefone na propria
             # Frete Rapido (`quote/{id_frete}`) como segunda fonte.
-            await self._eventos.concluir(chave, StatusEvento.SEM_CONTATO)
+            await self._eventos.concluir(
+                chave, StatusEvento.SEM_CONTATO, dono=dono
+            )
             return Desfecho(StatusEvento.SEM_CONTATO, grupo)
 
-        # 5. Interruptor geral. Ate aqui tudo rodou de verdade -- inclusive a
+        # 6. Interruptor geral. Ate aqui tudo rodou de verdade -- inclusive a
         # confirmacao na fonte e a consulta a Shopify -- e e isso que da a
         # medicao real da Fase 1.
         if not self._s.notificacao_ativa:
-            await self._eventos.concluir(chave, StatusEvento.OBSERVADO)
+            await self._eventos.concluir(chave, StatusEvento.OBSERVADO, dono=dono)
             logger.info(
                 "aviso OBSERVADO (envio desligado): pedido %s, codigo %s, grupo %s",
                 numero,
@@ -339,9 +401,24 @@ class ServicoNotificacao:
             )
             return Desfecho(StatusEvento.OBSERVADO, grupo)
 
-        # 6. Entrega. `confirmada` so e nula com a verificacao desligada -- o
+        # 7. Entrega. `confirmada` so e nula com a verificacao desligada -- o
         # interruptor de emergencia. Nesse modo o webhook volta a ser a fonte,
         # com a ressalva que isso carrega.
+        #
+        # Renovar o lease IMEDIATAMENTE antes do efeito externo estreita para
+        # perto de zero a janela entre "sou dono" e "enviei". Sem isto, um lease
+        # vencido durante a consulta a Shopify deixaria dois processos enviarem.
+        if not await self._eventos.renovar(
+            chave, dono=dono, lease_s=self._s.notificacao_lease_s
+        ):
+            logger.warning(
+                "lease do pedido %s (codigo %s) perdido antes do envio; outro "
+                "processo assumiu",
+                numero,
+                evento.codigo,
+            )
+            return Desfecho(StatusEvento.PENDENTE, grupo, "lease perdido")
+
         ocorrencia = confirmada or _da_webhook(evento)
         payload = montar_payload(
             numero, ocorrencia, grupo, pedido.telefone, pedido.nome_cliente
@@ -351,10 +428,12 @@ class ServicoNotificacao:
         except N8nErro as exc:
             falha = truncar(redigir_excecao(exc), MAX_ERRO)
             logger.error("falha ao entregar aviso ao n8n: %s", falha)
-            await self._eventos.concluir(chave, StatusEvento.PENDENTE, falha)
+            await self._eventos.concluir(
+                chave, StatusEvento.PENDENTE, falha, dono=dono
+            )
             return Desfecho(StatusEvento.PENDENTE, grupo, falha)
 
-        await self._eventos.concluir(chave, StatusEvento.ENVIADO)
+        await self._eventos.concluir(chave, StatusEvento.ENVIADO, dono=dono)
         logger.info(
             "aviso enviado: pedido %s, codigo %s, grupo %s",
             numero,
@@ -370,10 +449,25 @@ def chave_idempotencia(numero: NumeroPedidoFR, ocorrencia: OcorrenciaFR) -> str:
     Derivada da ocorrencia CONFIRMADA, nunca do corpo do webhook: se viesse de
     la, bastaria variar um campo para gerar chave nova e furar a protecao --
     exatamente o que a chave existe para impedir.
+
+    A data cai para `data_atualizacao` e depois para o volume quando
+    `data_ocorrencia` e nula. Sem isso, duas ocorrencias legitimas do mesmo
+    pedido e codigo sem data gerariam a MESMA chave para sempre, e a segunda
+    tentativa de entrega -- dias depois -- seria descartada pelo n8n como
+    repetida.
+
+    Se nem isso existir, a chave e grosseira por construcao. O consumidor
+    precisa expirar as chaves (TTL alinhado a janela de negocio); guarda-las
+    para sempre transforma qualquer aviso legitimo futuro em duplicata.
     """
-    data = atribuir_fuso(ocorrencia.data_ocorrencia)
-    bruto = f"{numero}|{ocorrencia.codigo}|{data.isoformat() if data else ''}"
-    return hashlib.sha256(bruto.encode()).hexdigest()[:32]
+    data = atribuir_fuso(ocorrencia.data_ocorrencia or ocorrencia.data_atualizacao)
+    partes = [
+        str(numero),
+        str(ocorrencia.codigo),
+        data.isoformat() if data else "",
+        ocorrencia.codigo_volume or "",
+    ]
+    return hashlib.sha256("|".join(partes).encode()).hexdigest()[:32]
 
 
 def _da_webhook(evento: WebhookOcorrenciaFR) -> OcorrenciaFR:

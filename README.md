@@ -90,6 +90,19 @@ existência de pedido. Não imprime segredo algum.
 Testes marcados com `contrato` batem nas APIs reais e exigem segredos; ficam
 fora do CI.
 
+Os marcados com `integracao` exercitam **concorrência real** contra Postgres — o
+advisory lock, o `ON CONFLICT` e o fencing do lease. Os testes normais usam a
+implementação em memória, onde `adquirir` é atômico por construção: eles provam a
+lógica do serviço, não o SQL. Rode antes de ligar o envio:
+
+```bash
+docker run --rm -d -p 55432:5432 -e POSTGRES_PASSWORD=teste \
+  -e POSTGRES_DB=rastreio_teste --name pg-teste postgres:17-alpine
+
+DATABASE_URL_TESTE=postgresql+psycopg://postgres:teste@localhost:55432/rastreio_teste \
+  .venv/bin/python -m pytest tests/test_eventos_integracao.py -v
+```
+
 ## Decisões que não são óbvias
 
 **Normalização do número do pedido.** O que a Shopify chama de `name` nesta loja

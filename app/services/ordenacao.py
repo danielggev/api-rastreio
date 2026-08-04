@@ -19,10 +19,27 @@ from app.schemas import OcorrenciaFR
 _SEM_DATA = datetime.min
 
 
+def _comparavel(bruta: datetime | None) -> datetime:
+    """Forma naive, para que a ordenacao nunca compare aware com naive.
+
+    A Frete Rapido manda datas SEM fuso (`"2026-07-23 15:37:12"`), e todo o
+    projeto assume isso. Mas o schema aceita as duas formas, e basta uma unica
+    ocorrencia com offset no meio de outras sem para o `sorted` estourar
+    `TypeError` -- derrubando junto a pagina de rastreio, que usa esta mesma
+    funcao.
+
+    Aqui so precisamos de ordem total consistente, nao do instante correto: a
+    atribuicao de fuso acontece depois, em `datas.atribuir_fuso`.
+    """
+    if bruta is None:
+        return _SEM_DATA
+    return bruta.replace(tzinfo=None) if bruta.tzinfo is not None else bruta
+
+
 def _chave(o: OcorrenciaFR) -> tuple[datetime, datetime, int]:
     return (
-        o.data_ocorrencia or _SEM_DATA,
-        o.data_atualizacao or _SEM_DATA,
+        _comparavel(o.data_ocorrencia),
+        _comparavel(o.data_atualizacao),
         o.indice_origem,
     )
 

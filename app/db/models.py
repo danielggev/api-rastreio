@@ -128,6 +128,30 @@ class EventoFrete(Base):
     # Expira sozinho: se o processo morrer no meio, a proxima reentrega da Frete
     # Rapido reassume em vez de o evento ficar preso para sempre.
     processando_ate: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    # DONO do lease (fencing). Sem isto, um worker cujo lease expirou ainda
+    # conseguia concluir e apagar o lease de quem assumiu depois: `concluir`
+    # filtrava so pela chave do evento. O novo dono seguia trabalhando sobre uma
+    # linha ja sobrescrita, e podia enviar de novo.
+    #
+    # Toda escrita que produz efeito externo passa a exigir posse comprovada.
+    processando_por: Mapped[str | None] = mapped_column(String(64))
+
+    # COOLDOWN. Sem ele, o teto de tentativas so valia para linha nova: repetir
+    # a MESMA linha `pendente` passava direto, e como concluir libera o lease,
+    # cada repeticao readquiria e consultava a Frete Rapido de novo. Amplificacao
+    # ilimitada numa unica chave, na mesma cota que a pagina de rastreio usa.
+    proxima_tentativa_em: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
+
+    # Momento em que este evento OCUPOU uma vaga de mensagem. Separado do lease
+    # de propósito: o lease e sobre processamento, isto e sobre a cota de avisos.
+    # So e marcado DEPOIS da confirmacao na fonte -- antes disso, eventos
+    # forjados enchiam a cota e barravam avisos legitimos concorrentes.
+    aviso_reservado_em: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
     # Mensagem ja redigida (`redigir_excecao`), truncada.
     erro: Mapped[str | None] = mapped_column(String(256))
 

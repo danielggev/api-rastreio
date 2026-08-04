@@ -124,19 +124,35 @@ class Settings(BaseSettings):
 
     # Trava anti-spam. Uma transportadora que posta cinco codigos em sequencia
     # nao pode virar cinco mensagens -- e um segredo vazado nao pode virar mil.
-    notificacao_max_por_pedido: int = 3
-    notificacao_janela_horas: int = 6
+    notificacao_max_por_pedido: int = Field(default=3, ge=1, le=50)
+    notificacao_janela_horas: int = Field(default=6, ge=1, le=168)
 
-    # Teto de TENTATIVAS por pedido na mesma janela. Limita CUSTO, nao mensagem:
-    # um evento que nunca confirma nao incrementa a cota de avisos e, sem este
-    # teto, cada repeticao custaria uma consulta a Frete Rapido -- na mesma cota
-    # de 720/min que a pagina de rastreio usa.
-    notificacao_max_tentativas_pedido: int = 20
+    # Janela de AGREGACAO DE VOLUME -- curta, e outra grandeza. Uma remessa de
+    # varias caixas gera uma ocorrencia por volume com minutos de diferenca
+    # (observado: 4 em 21 minutos), e isso e UM fato. Ja duas tentativas de
+    # entrega reais no mesmo dia sao DOIS fatos, e o cliente precisa saber dos
+    # dois.
+    #
+    # Usar a janela anti-spam (horas) para as duas coisas silenciava a segunda
+    # tentativa legitima. Sao conceitos distintos e agora tem parametros
+    # distintos.
+    notificacao_janela_volume_min: int = Field(default=60, ge=1, le=1440)
+
+    # Teto de TENTATIVAS por pedido na mesma janela. Limita CUSTO, nao mensagem.
+    notificacao_max_tentativas_pedido: int = Field(default=20, ge=1, le=500)
+
+    # Espera minima antes de reprocessar a MESMA linha pendente. Sem isto, cada
+    # repeticao readquiria o lease e reconsultava a Frete Rapido sem limite --
+    # o teto de tentativas so barrava linha nova. Menor que o primeiro degrau da
+    # escada de reentrega deles (1 min), para nao atrasar o caminho legitimo.
+    notificacao_cooldown_s: int = Field(default=45, ge=1, le=3600)
 
     # Duracao do lease de processamento. Precisa cobrir o pior caso do caminho
-    # inteiro (Frete Rapido + Shopify + n8n) com folga, e ser curto o bastante
-    # para que um processo morto nao prenda o evento por muito tempo.
-    notificacao_lease_s: int = 60
+    # inteiro com folga: Frete Rapido (8s) + Shopify (ate ~14s quando renova o
+    # token OAuth, que tem orcamento proprio) + n8n (6s), MAIS esperas que nao
+    # entram em orcamento nenhum -- trava de renovacao compartilhada e espera por
+    # conexao do banco. O `renovar` antes do envio cobre o resto.
+    notificacao_lease_s: int = Field(default=120, ge=30, le=900)
 
     # Confirmar cada evento na PROPRIA Frete Rapido antes de avisar o cliente.
     #

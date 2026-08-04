@@ -55,4 +55,5 @@ testpaths = ["tests"]
 asyncio_mode = "auto"
 markers = [
     "contrato: testes contra as APIs reais; exigem segredos e rodam fora do CI",
+    "integracao: exigem Postgres real (DATABASE_URL_TESTE); rodam fora do CI",
 ]

@@ -21,6 +21,7 @@ from fastapi.testclient import TestClient
 from app.config import Settings
 from app.main import criar_app
 from app.schemas import Grupo, OcorrenciaFR, StatusEvento, WebhookOcorrenciaFR
+from app.services.datas import atribuir_fuso
 from app.services.eventos import EventosMemoria
 from app.services.multi_cnpj import BuscadorMultiCNPJ, ResultadoBusca
 from app.services.normalizacao import NumeroPedidoFR
@@ -88,11 +89,15 @@ class FreteRapidoFalso:
         historico: list[int] | None = None,
         erro: Exception | None = None,
         houve_falha: bool = False,
+        sem_data: set[int] | None = None,
     ) -> None:
         self._atual = atual
         self._historico = HISTORICO if historico is None else historico
         self._erro = erro
         self._houve_falha = houve_falha
+        # Codigos que a Frete Rapido devolve SEM `data_ocorrencia` -- o schema
+        # aceita, e a ordenacao os empurra para o fim da lista.
+        self._sem_data = sem_data or set()
         # Cada consulta feita, com o CNPJ pedido. A confirmacao NAO pode
         # consultar mais de um token por evento.
         self.consultas: list[str | None] = []
@@ -118,7 +123,9 @@ class FreteRapidoFalso:
             [
                 OcorrenciaFR(
                     codigo=c,
-                    data_ocorrencia=INICIO + timedelta(hours=i),
+                    data_ocorrencia=(
+                        None if c in self._sem_data else INICIO + timedelta(hours=i)
+                    ),
                     razao_social_transportadora="EMPRESA BRASILEIRA DE CORREIOS E TELEGRAFOS",
                 )
                 for i, c in enumerate(codigos)
@@ -180,6 +187,22 @@ def servico(
         frete_rapido=fr or FreteRapidoFalso(atual=codigo_atual),  # type: ignore[arg-type]
     )
     return servico, sh, fila
+
+
+def avancar_tempo(svc: ServicoNotificacao, **delta: float) -> None:
+    """Simula a passagem do tempo, empurrando os registros para tras.
+
+    Necessario porque varias regras sao por JANELA -- cooldown, agregacao de
+    volume, anti-spam -- e testa-las de verdade exige tempo passando, nao
+    `sleep`.
+    """
+    d = timedelta(**delta)
+    for linha in svc._eventos._linhas.values():  # type: ignore[attr-defined]
+        linha.recebido_em -= d
+        for campo in ("aviso_reservado_em", "proxima_tentativa_em", "processando_ate"):
+            valor = getattr(linha, campo)
+            if valor is not None:
+                setattr(linha, campo, valor - d)
 
 
 async def processar(bruto: dict[str, Any], **kw: Any) -> Any:
@@ -402,10 +425,7 @@ async def test_mesmo_codigo_depois_da_janela_avisa_de_novo() -> None:
     )
     await svc.processar(evento_a)
 
-    # A janela e contada a partir de `recebido_em`. Simula a passagem do tempo
-    # empurrando o registro anterior para tras.
-    for linha in svc._eventos._linhas.values():  # type: ignore[attr-defined]
-        linha.recebido_em -= timedelta(hours=48)
+    avancar_tempo(svc, hours=48)
 
     await svc.processar(
         WebhookOcorrenciaFR.model_validate(
@@ -509,8 +529,10 @@ async def test_n8n_fora_do_ar_pede_reenvio_e_depois_conclui() -> None:
     assert primeira.status is StatusEvento.PENDENTE
     assert primeira.status_http == 503
 
-    # O n8n volta; a reentrega da FR encontra a linha em `pendente` e conclui.
+    # O n8n volta. A reentrega da FR so e aceita depois do cooldown -- que
+    # existe para impedir reconsulta ilimitada da mesma linha pendente.
     svc._n8n = N8nFalso()  # type: ignore[assignment]
+    avancar_tempo(svc, minutes=5)
     segunda = await svc.processar(evento)
 
     assert segunda.status is StatusEvento.ENVIADO
@@ -636,6 +658,132 @@ async def test_rajada_simultanea_no_mesmo_pedido_respeita_a_cota() -> None:
     await asyncio.gather(*(svc.processar(e) for e in eventos))
 
     assert len(fila.enviados) <= 2
+
+
+async def test_sem_data_nao_vira_desfecho_terminal() -> None:
+    """REGRESSAO da rodada 2 da revisao.
+
+    `ordenar_desc` empurra ocorrencia SEM DATA para o fim da lista -- e uma
+    convencao de apresentacao, nao prova de que e antiga. Tratar isso como
+    "seguiu adiante" descartaria com 200 um aviso legitimo cuja unica falha e
+    nao ter timestamp, e ele se perderia em silencio.
+    """
+    # 232 chegou agora, mas sem `data_ocorrencia`: a ordenacao o joga para o fim
+    # e ele parece historico.
+    fr = FreteRapidoFalso(atual=2, historico=[0, 232], sem_data={232})
+
+    desfecho, _, fila = await processar(payload(codigo=232), fr=fr)
+
+    # Sem data comparavel, a duvida vira reenvio, nao descarte.
+    assert desfecho.status is StatusEvento.PENDENTE
+    assert fila.enviados == []
+
+
+async def test_repeticao_da_mesma_linha_pendente_respeita_cooldown() -> None:
+    """REGRESSAO da amplificacao 1-para-1 apontada na rodada 2.
+
+    O teto de tentativas so barra linha NOVA. Repetir a MESMA linha pendente
+    passava direto, e como `concluir` libera o lease, cada repeticao readquiria
+    e consultava a Frete Rapido de novo -- sem limite, na mesma cota da pagina.
+    """
+    fr = FreteRapidoFalso(atual=2)  # nunca confirma: fica pendente
+    svc, _, _ = servico(fr=fr)
+    evento = WebhookOcorrenciaFR.model_validate(payload())
+
+    for _ in range(10):
+        await svc.processar(evento)
+
+    # Uma consulta na primeira vez; as demais param no cooldown.
+    assert len(fr.consultas) == 1
+
+
+async def test_evento_em_processamento_pede_reenvio_com_503() -> None:
+    """REGRESSAO da rodada 2: 200 aqui PERDE o evento.
+
+    HTTP 200 e terminal para a Frete Rapido -- ela para de tentar. Se o processo
+    que detem o lease morrer depois disso, o lease expira e ninguem reassume:
+    nao ha fila local. Com 503 ela continua tentando.
+    """
+    from app.services.eventos import ChaveEvento
+
+    svc, _, _ = servico()
+    evento = WebhookOcorrenciaFR.model_validate(payload())
+    chave = ChaveEvento("59552", 232, atribuir_fuso(evento.data_ocorrencia))
+
+    # Simula outro processo com o lease vivo.
+    await svc._eventos.adquirir(  # type: ignore[attr-defined]
+        chave,
+        Grupo.AGUARDANDO_RETIRADA,
+        dono="outro-processo",
+        lease_s=120,
+        cooldown_s=45,
+        desde=datetime.now(UTC) - timedelta(hours=6),
+        max_tentativas=20,
+    )
+
+    desfecho = await svc.processar(evento)
+
+    assert desfecho.status is StatusEvento.PENDENTE
+    assert desfecho.status_http == 503
+
+
+async def test_worker_com_lease_vencido_nao_sobrescreve_o_novo_dono() -> None:
+    """REGRESSAO do fencing (rodada 2).
+
+    `concluir` filtrava so pela chave: um worker cujo lease venceu apagava o
+    lease de quem assumiu depois, e o novo dono seguia sobre linha sobrescrita.
+    """
+    from app.services.eventos import ChaveEvento, EventosMemoria
+
+    eventos = EventosMemoria()
+    chave = ChaveEvento("59552", 232, None)
+    comum = {
+        "lease_s": 120,
+        "cooldown_s": 45,
+        "desde": datetime.now(UTC) - timedelta(hours=6),
+        "max_tentativas": 20,
+    }
+
+    await eventos.adquirir(chave, Grupo.AGUARDANDO_RETIRADA, dono="A", **comum)
+    # O lease de A vence e B assume.
+    linha = eventos._linhas[chave]  # type: ignore[attr-defined]
+    linha.processando_ate = datetime.now(UTC) - timedelta(seconds=1)
+    linha.proxima_tentativa_em = None
+    await eventos.adquirir(chave, Grupo.AGUARDANDO_RETIRADA, dono="B", **comum)
+
+    # A, atrasado, tenta concluir.
+    await eventos.concluir(chave, StatusEvento.ENVIADO, dono="A")
+
+    assert eventos._linhas[chave].status is StatusEvento.PENDENTE  # type: ignore[attr-defined]
+    assert eventos._linhas[chave].dono == "B"  # type: ignore[attr-defined]
+    assert await eventos.renovar(chave, dono="B", lease_s=120) is True
+    assert await eventos.renovar(chave, dono="A", lease_s=120) is False
+
+
+async def test_evento_forjado_nao_ocupa_vaga_de_aviso() -> None:
+    """REGRESSAO do envenenamento de cota (rodada 2).
+
+    Com a cota tomada ANTES da confirmacao, tres eventos forjados enchiam as
+    vagas e o legitimo que chegasse junto era descartado sem nunca ser
+    consultado.
+    """
+    fr = FreteRapidoFalso(atual=232)
+    svc, _, fila = servico(fr=fr, s=settings(notificacao_max_por_pedido=1))
+
+    # Tres forjados: codigo acionavel que a fonte nao confirma como atual.
+    for d in range(1, 4):
+        await svc.processar(
+            WebhookOcorrenciaFR.model_validate(
+                payload(codigo=32, data_ocorrencia=f"2026-08-0{d} 09:00:00")
+            )
+        )
+    assert fila.enviados == []
+
+    # O legitimo ainda encontra vaga.
+    desfecho = await svc.processar(WebhookOcorrenciaFR.model_validate(payload()))
+
+    assert desfecho.status is StatusEvento.ENVIADO
+    assert len(fila.enviados) == 1
 
 
 async def test_nao_confirmado_e_PENDENTE_e_nao_descarte() -> None:

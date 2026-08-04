@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from datetime import date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -200,3 +200,28 @@ def test_hoje_local_usa_o_fuso_de_exibicao() -> None:
     assert hoje_local(ZoneInfo("America/Sao_Paulo")) == datetime.now(
         ZoneInfo("America/Sao_Paulo")
     ).date()
+
+
+def test_ordenacao_nao_estoura_com_data_aware_no_meio_de_naive() -> None:
+    """A Frete Rapido manda datas SEM fuso, e o projeto inteiro assume isso.
+
+    Mas o schema aceita as duas formas, e UMA ocorrencia com offset no meio de
+    outras sem fazia o `sorted` estourar TypeError -- derrubando junto a pagina
+    de rastreio, que usa a mesma funcao. Ordem total consistente basta aqui; o
+    fuso e atribuido depois.
+    """
+    ocorrencias = indexar(
+        [
+            OcorrenciaFR(codigo=0, data_ocorrencia=datetime(2026, 8, 1, 9, 0)),
+            OcorrenciaFR(
+                codigo=232, data_ocorrencia=datetime(2026, 8, 1, 12, 0, tzinfo=UTC)
+            ),
+            OcorrenciaFR(codigo=2, data_ocorrencia=None),
+        ]
+    )
+
+    ordenadas = ordenar_desc(ocorrencias)
+
+    assert ordenadas[0].codigo == 232
+    # Sem data continua indo para o fim, nunca para o topo.
+    assert ordenadas[-1].codigo == 2
