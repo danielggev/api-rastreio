@@ -127,6 +127,17 @@ class Settings(BaseSettings):
     notificacao_max_por_pedido: int = 3
     notificacao_janela_horas: int = 6
 
+    # Teto de TENTATIVAS por pedido na mesma janela. Limita CUSTO, nao mensagem:
+    # um evento que nunca confirma nao incrementa a cota de avisos e, sem este
+    # teto, cada repeticao custaria uma consulta a Frete Rapido -- na mesma cota
+    # de 720/min que a pagina de rastreio usa.
+    notificacao_max_tentativas_pedido: int = 20
+
+    # Duracao do lease de processamento. Precisa cobrir o pior caso do caminho
+    # inteiro (Frete Rapido + Shopify + n8n) com folga, e ser curto o bastante
+    # para que um processo morto nao prenda o evento por muito tempo.
+    notificacao_lease_s: int = 60
+
     # Confirmar cada evento na PROPRIA Frete Rapido antes de avisar o cliente.
     #
     # O webhook nao e assinado: o segredo da URL prova que quem chamou conhece o
@@ -318,8 +329,11 @@ class Settings(BaseSettings):
                 problemas.append(f"{nome}: {exc}")
 
         if self.notificacao_ativa:
-            # Ligar o envio sem ter o que enviar, para onde enviar, ou sem a
-            # barreira que protege a rota e sempre engano de configuracao.
+            # Com o envio LIGADO ha um cliente do outro lado. Toda barreira que
+            # a documentacao promete tem de estar de fato no lugar -- nao basta
+            # existir no codigo. Revisao de seguranca mostrou que a combinacao
+            # "envio ativo + Bearer vazio + confirmacao desligada" subia
+            # tranquila, e nela o segredo da URL virava a unica barreira.
             if not grupos and not self.codigos_extra:
                 problemas.append(
                     "NOTIFICACAO_ATIVA=true sem NOTIFICACAO_GRUPOS nem "
@@ -331,6 +345,42 @@ class Settings(BaseSettings):
                 problemas.append(
                     "NOTIFICACAO_ATIVA=true exige FR_WEBHOOK_SEGREDOS "
                     "(ou FR_WEBHOOK_SEGREDO)"
+                )
+
+            # O segredo da URL vaza para o log de acesso do proxy, que nao
+            # controlamos. Quem autentica de verdade e o Bearer.
+            if len(self.fr_webhook_bearer) < MIN_SEGREDO_WEBHOOK:
+                problemas.append(
+                    "NOTIFICACAO_ATIVA=true exige FR_WEBHOOK_BEARER com pelo "
+                    f"menos {MIN_SEGREDO_WEBHOOK} caracteres: o segredo da URL "
+                    "aparece no log de acesso do proxy e nao serve sozinho"
+                )
+            if not self.n8n_webhook_token:
+                problemas.append(
+                    "NOTIFICACAO_ATIVA=true exige N8N_WEBHOOK_TOKEN: sem ele, "
+                    "quem descobrir a URL do n8n dispara mensagem para qualquer "
+                    "telefone"
+                )
+            # "Envia sem confirmar" nao deve ser um estado alcancavel: sem a
+            # confirmacao, o TEXTO que chega ao cliente volta a vir de quem
+            # chamou a rota.
+            if not self.notificacao_verificar_na_fonte:
+                problemas.append(
+                    "NOTIFICACAO_VERIFICAR_NA_FONTE=false com NOTIFICACAO_ATIVA="
+                    "true: o interruptor de emergencia da verificacao exige "
+                    "desligar tambem o envio"
+                )
+            # Chave de segredo sem token correspondente = evento que nunca
+            # confirma, em silencio.
+            orfas = sorted(
+                c
+                for c in self.segredos_webhook.values()
+                if c and c not in self.tokens_frete_rapido
+            )
+            if orfas:
+                problemas.append(
+                    f"CNPJs em FR_WEBHOOK_SEGREDOS sem token em "
+                    f"FRETE_RAPIDO_TOKENS: {', '.join(orfas)}"
                 )
 
         # O segredo e a barreira principal da rota: a Frete Rapido nao assina o

@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 import logging
 from collections.abc import Iterator
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from io import StringIO
 from pathlib import Path
 from typing import Any
@@ -25,12 +25,14 @@ from app.services.eventos import EventosMemoria
 from app.services.multi_cnpj import BuscadorMultiCNPJ, ResultadoBusca
 from app.services.normalizacao import NumeroPedidoFR
 from app.services.notificacao import ServicoNotificacao, montar_payload
+from app.services.ordenacao import indexar
 from app.services.shopify import PedidoShopify, ShopifyErro
 
 FIXTURES = Path(__file__).parent / "fixtures"
 SEGREDO = "s" * 40
 ROTA = f"/api/v1/webhook/frete-rapido/{SEGREDO}"
 TELEFONE = "+5511988887777"
+BEARER = "b" * 48
 
 
 def payload(**alteracoes: Any) -> dict[str, Any]:
@@ -67,27 +69,39 @@ class N8nFalso:
         self.enviados.append(payload)
 
 
-# Historico plausivel de um pedido, cobrindo os codigos usados nesta suite. E o
-# padrao NEUTRO: os testes que nao tratam de verificacao nao devem tropecar nela.
-# Quem testa a verificacao passa a propria lista.
-CONFIRMA_TUDO = [0, 15, 2, 3, 32, 232]
+INICIO = datetime(2026, 8, 1, 9, 0, tzinfo=UTC)
+# Historico plausivel ANTES do evento: contratado, coletado, em transito.
+HISTORICO = [0, 15, 2]
 
 
 class FreteRapidoFalso:
-    """Substitui o `BuscadorMultiCNPJ` na confirmacao do evento na fonte."""
+    """Substitui o `BuscadorMultiCNPJ` na confirmacao do evento na fonte.
+
+    Modela ESTADO ATUAL, nao so historico: `atual` e a ocorrencia mais recente,
+    e e ela que a confirmacao compara. Foi a distincao que uma revisao de
+    seguranca mostrou faltar -- "existe no historico" nao e "e o estado agora".
+    """
 
     def __init__(
         self,
-        codigos: list[int] | None = None,
+        atual: int | None = None,
+        historico: list[int] | None = None,
         erro: Exception | None = None,
         houve_falha: bool = False,
     ) -> None:
-        self._codigos = CONFIRMA_TUDO if codigos is None else codigos
+        self._atual = atual
+        self._historico = HISTORICO if historico is None else historico
         self._erro = erro
         self._houve_falha = houve_falha
         # Cada consulta feita, com o CNPJ pedido. A confirmacao NAO pode
         # consultar mais de um token por evento.
         self.consultas: list[str | None] = []
+
+    def avancar(self, codigo: int) -> None:
+        """A encomenda avanca: o estado atual vira historico e `codigo` assume."""
+        if self._atual is not None:
+            self._historico = [*self._historico, self._atual]
+        self._atual = codigo
 
     async def buscar_no_cnpj(
         self, numero: NumeroPedidoFR, cnpj: str | None
@@ -95,9 +109,23 @@ class FreteRapidoFalso:
         self.consultas.append(cnpj)
         if self._erro is not None:
             raise self._erro
+
+        codigos = list(self._historico)
+        if self._atual is not None:
+            codigos.append(self._atual)
+        # Datas crescentes: a ultima da lista e a mais recente.
+        ocorrencias = indexar(
+            [
+                OcorrenciaFR(
+                    codigo=c,
+                    data_ocorrencia=INICIO + timedelta(hours=i),
+                    razao_social_transportadora="EMPRESA BRASILEIRA DE CORREIOS E TELEGRAFOS",
+                )
+                for i, c in enumerate(codigos)
+            ]
+        )
         return ResultadoBusca(
-            ocorrencias=[OcorrenciaFR(codigo=c) for c in self._codigos],
-            houve_falha=self._houve_falha,
+            ocorrencias=ocorrencias, houve_falha=self._houve_falha
         )
 
 
@@ -117,11 +145,16 @@ def pedido(**kw: Any) -> PedidoShopify:
 
 
 def settings(**kw: Any) -> Settings:
+    # Com `notificacao_ativa=True` a validacao de boot exige TODAS as barreiras
+    # -- e essa exigencia e ela propria um teste: se alguma sair daqui, os
+    # cenarios de envio param de subir.
     base: dict[str, Any] = {
         "fr_webhook_segredo": SEGREDO,
+        "fr_webhook_bearer": BEARER,
         "notificacao_grupos": "aguardando_retirada,tentativa_falha",
         "notificacao_ativa": True,
         "n8n_webhook_url": "https://n8n.exemplo/webhook/fr",
+        "n8n_webhook_token": "t" * 40,
     }
     base.update(kw)
     return Settings(**base)
@@ -133,20 +166,24 @@ def servico(
     n8n: N8nFalso | None = None,
     s: Settings | None = None,
     fr: FreteRapidoFalso | None = None,
+    codigo_atual: int = 232,
 ) -> tuple[ServicoNotificacao, ShopifyFalsa, N8nFalso]:
     sh = shopify or ShopifyFalsa(pedido())
     fila = n8n or N8nFalso()
+    # Por padrao a Frete Rapido confirma o evento em questao: os testes que NAO
+    # tratam de verificacao nao devem tropecar nela.
     servico = ServicoNotificacao(
         shopify=sh,  # type: ignore[arg-type]
         eventos=EventosMemoria(),
         n8n=fila,  # type: ignore[arg-type]
         settings=s or settings(),
-        frete_rapido=fr or FreteRapidoFalso(),  # type: ignore[arg-type]
+        frete_rapido=fr or FreteRapidoFalso(atual=codigo_atual),  # type: ignore[arg-type]
     )
     return servico, sh, fila
 
 
 async def processar(bruto: dict[str, Any], **kw: Any) -> Any:
+    kw.setdefault("codigo_atual", int(bruto["codigo"]))
     svc, sh, fila = servico(**kw)
     desfecho = await svc.processar(WebhookOcorrenciaFR.model_validate(bruto))
     return desfecho, sh, fila
@@ -316,9 +353,13 @@ async def test_dedup_vale_com_data_de_ocorrencia_NULA() -> None:
 
 async def test_ocorrencia_nova_no_mesmo_pedido_dispara_de_novo() -> None:
     """A dedup nao pode calar um evento legitimamente novo."""
-    svc, _, fila = servico()
+    fr = FreteRapidoFalso(atual=232)
+    svc, _, fila = servico(fr=fr)
 
     await svc.processar(WebhookOcorrenciaFR.model_validate(payload()))
+
+    # Dias depois a encomenda volta para tentativa de entrega.
+    fr.avancar(32)
     await svc.processar(
         WebhookOcorrenciaFR.model_validate(
             payload(codigo=32, data_ocorrencia="2026-08-04 09:00:00")
@@ -330,7 +371,7 @@ async def test_ocorrencia_nova_no_mesmo_pedido_dispara_de_novo() -> None:
 
 async def test_trava_anti_spam_contem_rajada_no_mesmo_pedido() -> None:
     """Uma transportadora que posta cinco codigos seguidos nao vira cinco avisos."""
-    svc, _, fila = servico(s=settings(notificacao_max_por_pedido=2))
+    svc, _, fila = servico(s=settings(notificacao_max_por_pedido=2), codigo_atual=32)
 
     for dia in range(1, 6):
         await svc.processar(
@@ -389,6 +430,7 @@ async def test_n8n_fora_do_ar_pede_reenvio_e_depois_conclui() -> None:
         eventos=EventosMemoria(),
         n8n=quebrado,  # type: ignore[arg-type]
         settings=settings(),
+        frete_rapido=FreteRapidoFalso(atual=232),  # type: ignore[arg-type]
     )
     evento = WebhookOcorrenciaFR.model_validate(payload())
 
@@ -410,7 +452,7 @@ async def test_n8n_fora_do_ar_pede_reenvio_e_depois_conclui() -> None:
 
 
 async def test_evento_confirmado_pela_frete_rapido_e_enviado() -> None:
-    desfecho, _, fila = await processar(payload(), fr=FreteRapidoFalso([0, 15, 232]))
+    desfecho, _, fila = await processar(payload(), fr=FreteRapidoFalso(atual=232))
 
     assert desfecho.status is StatusEvento.ENVIADO
     assert len(fila.enviados) == 1
@@ -424,13 +466,105 @@ async def test_evento_NAO_confirmado_nao_vira_mensagem() -> None:
     buscar um pacote que nao esta la.
     """
     desfecho, _, fila = await processar(
-        payload(), fr=FreteRapidoFalso([0, 15, 2])  # sem o 232
+        payload(), fr=FreteRapidoFalso(atual=2)  # 232 nunca aconteceu
     )
 
     assert desfecho.status is StatusEvento.PENDENTE
     assert fila.enviados == []
     assert desfecho.detalhe is not None
-    assert "nao confirmada" in desfecho.detalhe
+    assert "nao existe" in desfecho.detalhe
+
+
+async def test_replay_de_ocorrencia_HISTORICA_nao_vira_mensagem() -> None:
+    """REGRESSAO da falha CRITICA apontada em revisao de seguranca.
+
+    A versao anterior perguntava "este codigo existe no historico?". O endpoint
+    devolve o HISTORICO INTEIRO, entao um "disponivel para retirada" de dias
+    atras confirmava para sempre -- bastava reproduzir o evento antigo num
+    pedido JA ENTREGUE para mandar o cliente a agencia a toa.
+
+    A pergunta certa e sobre o estado ATUAL.
+    """
+    # A encomenda passou por 232, mas ja foi entregue (codigo 3).
+    fr = FreteRapidoFalso(atual=3, historico=[0, 15, 2, 232])
+
+    desfecho, _, fila = await processar(payload(codigo=232), fr=fr)
+
+    assert fila.enviados == []
+    assert desfecho.status is StatusEvento.DESCARTADO
+    assert desfecho.detalhe is not None
+    assert "seguiu adiante" in desfecho.detalhe
+
+
+async def test_ocorrencia_que_seguiu_adiante_encerra_com_200() -> None:
+    """Nao adianta reenviar: a encomenda nao volta ao estado anterior.
+
+    Diferente do "codigo nao existe", que pode ser defasagem de propagacao e
+    merece nova tentativa.
+    """
+    fr = FreteRapidoFalso(atual=3, historico=[232])
+
+    desfecho, _, _ = await processar(payload(codigo=232), fr=fr)
+
+    assert desfecho.status_http == 200
+
+
+async def test_data_forjada_no_payload_nao_cria_aviso_novo() -> None:
+    """Variar `data_ocorrencia` gera chave de dedup nova, mas nao mensagem falsa.
+
+    Com o estado atual conferido, o pior que um replay consegue e repetir uma
+    mensagem VERDADEIRA -- e a trava anti-spam limita isso.
+    """
+    fr = FreteRapidoFalso(atual=3, historico=[232])
+    svc, _, fila = servico(fr=fr)
+
+    for dia in range(1, 6):
+        await svc.processar(
+            WebhookOcorrenciaFR.model_validate(
+                payload(codigo=232, data_ocorrencia=f"2026-08-0{dia} 10:00:00")
+            )
+        )
+
+    assert fila.enviados == []
+
+
+async def test_entregas_simultaneas_do_mesmo_evento_enviam_uma_vez() -> None:
+    """REGRESSAO da corrida apontada em revisao de seguranca.
+
+    `ON CONFLICT` arbitra quem cria a LINHA, nao quem executa o EFEITO. Sem o
+    lease, uma requisicao inseria e a outra lia `pendente` -- e ambas seguiam,
+    porque `pendente` significava tanto "alguem esta processando" quanto "pode
+    tentar de novo".
+    """
+    import asyncio
+
+    svc, _, fila = servico()
+    evento = WebhookOcorrenciaFR.model_validate(payload())
+
+    await asyncio.gather(*(svc.processar(evento) for _ in range(8)))
+
+    assert len(fila.enviados) == 1
+
+
+async def test_rajada_simultanea_no_mesmo_pedido_respeita_a_cota() -> None:
+    """A cota contada FORA da transacao deixava N corridas verem zero.
+
+    Cinco eventos distintos do mesmo pedido, todos ao mesmo tempo, com teto 2.
+    """
+    import asyncio
+
+    fr = FreteRapidoFalso(atual=32)
+    svc, _, fila = servico(fr=fr, s=settings(notificacao_max_por_pedido=2))
+
+    eventos = [
+        WebhookOcorrenciaFR.model_validate(
+            payload(codigo=32, data_ocorrencia=f"2026-08-0{d} 09:00:00")
+        )
+        for d in range(1, 6)
+    ]
+    await asyncio.gather(*(svc.processar(e) for e in eventos))
+
+    assert len(fila.enviados) <= 2
 
 
 async def test_nao_confirmado_e_PENDENTE_e_nao_descarte() -> None:
@@ -440,7 +574,7 @@ async def test_nao_confirmado_e_PENDENTE_e_nao_descarte() -> None:
     (1, 2, 3, 5, 10 min...) resolve o atraso de propagacao sozinha. Descartar
     perderia um aviso legitimo por alguns segundos de diferenca.
     """
-    desfecho, _, _ = await processar(payload(), fr=FreteRapidoFalso([2]))
+    desfecho, _, _ = await processar(payload(), fr=FreteRapidoFalso(atual=2))
 
     assert desfecho.status_http == 503
 
@@ -451,7 +585,7 @@ async def test_evento_forjado_nunca_toca_no_contato_do_cliente() -> None:
     A confirmacao roda ANTES da Shopify: nao buscamos o telefone de ninguem com
     base num evento que ainda nao sabemos se e real.
     """
-    desfecho, sh, fila = await processar(payload(), fr=FreteRapidoFalso([2]))
+    desfecho, sh, fila = await processar(payload(), fr=FreteRapidoFalso(atual=2))
 
     assert desfecho.status is StatusEvento.PENDENTE
     assert sh.chamadas == 0
@@ -472,7 +606,7 @@ async def test_frete_rapido_fora_do_ar_pede_reenvio() -> None:
 
 async def test_confirmacao_usa_o_token_do_cnpj_que_recebeu_o_evento() -> None:
     """Ja sabemos o CNPJ pelo segredo da URL: nao dependemos da tag da Shopify."""
-    fr = FreteRapidoFalso()
+    fr = FreteRapidoFalso(atual=232)
     svc, _, _ = servico(fr=fr)
 
     await svc.processar(WebhookOcorrenciaFR.model_validate(payload()), cnpj="melhores")
@@ -561,18 +695,58 @@ async def test_sem_cnpj_com_varios_tokens_recusa_confirmar() -> None:
         await buscador.buscar_no_cnpj(NumeroPedidoFR("59552"), None)
 
 
+def test_desligar_a_verificacao_com_envio_ligado_derruba_o_boot() -> None:
+    """"Envia sem confirmar" nao pode ser um estado alcancavel.
+
+    Sem a confirmacao, o TEXTO que chega ao cliente volta a vir de quem chamou a
+    rota -- que e exatamente a falha critica que a revisao apontou. O
+    interruptor de emergencia existe, mas exige desligar o envio junto.
+    """
+    with pytest.raises(ValueError, match="exige desligar tambem o envio"):
+        settings(notificacao_verificar_na_fonte=False)
+
+
 async def test_verificacao_desligada_pula_a_consulta() -> None:
-    """Interruptor de emergencia, caso as duas APIs deles divirjam algum dia."""
-    fr = FreteRapidoFalso([2])  # nao confirmaria
+    """Interruptor de emergencia, caso as duas APIs deles divirjam algum dia.
+
+    Com ele, a Fase 1 segue medindo sem consultar a Frete Rapido -- util se a
+    cota estiver sob pressao.
+    """
+    fr = FreteRapidoFalso(atual=2)  # nao confirmaria
     desfecho, _, fila = await processar(
         payload(),
         fr=fr,
-        s=settings(notificacao_verificar_na_fonte=False),
+        s=settings(
+            notificacao_verificar_na_fonte=False,
+            notificacao_ativa=False,
+            n8n_webhook_url="",
+            n8n_webhook_token="",
+        ),
     )
 
-    assert desfecho.status is StatusEvento.ENVIADO
-    assert len(fila.enviados) == 1
+    assert desfecho.status is StatusEvento.OBSERVADO
+    assert fila.enviados == []
     assert fr.consultas == []
+
+
+def test_envio_ligado_exige_bearer() -> None:
+    """O segredo da URL vaza para o log de acesso do proxy; o Bearer nao."""
+    with pytest.raises(ValueError, match="exige FR_WEBHOOK_BEARER"):
+        settings(fr_webhook_bearer="")
+
+
+def test_envio_ligado_exige_token_do_n8n() -> None:
+    with pytest.raises(ValueError, match="exige N8N_WEBHOOK_TOKEN"):
+        settings(n8n_webhook_token="")
+
+
+def test_cnpj_de_webhook_sem_token_da_frete_rapido_derruba_o_boot() -> None:
+    """Divergencia entre os dois mapas = evento que nunca confirma, em silencio."""
+    with pytest.raises(ValueError, match="sem token em FRETE_RAPIDO_TOKENS"):
+        settings(
+            fr_webhook_segredo="",
+            fr_webhook_segredos={"inexistente": "z" * 40},
+        )
 
 
 async def test_confirmacao_roda_antes_do_interruptor_de_envio() -> None:
@@ -581,7 +755,7 @@ async def test_confirmacao_roda_antes_do_interruptor_de_envio() -> None:
     Se ela so entrasse junto com o envio, o volume medido em observacao seria
     maior que o real -- e a Fase 2 comecaria com expectativa errada.
     """
-    fr = FreteRapidoFalso()
+    fr = FreteRapidoFalso(atual=232)
     desfecho, _, fila = await processar(
         payload(),
         fr=fr,
@@ -631,15 +805,29 @@ async def test_modo_observacao_distingue_descartado_de_observado() -> None:
 # --------------------------------------------------------------------------
 
 
+def _confirmada() -> OcorrenciaFR:
+    """Como a ocorrencia chega da API da Frete Rapido."""
+    return OcorrenciaFR(
+        codigo=232,
+        nome="Disponivel para retirada nos Correios",
+        data_ocorrencia=datetime(2026, 8, 3, 15, 37, 12),
+        razao_social_transportadora="EMPRESA BRASILEIRA DE CORREIOS E TELEGRAFOS",
+    )
+
+
 def test_payload_do_n8n_leva_o_minimo_de_dado_pessoal() -> None:
-    evento = WebhookOcorrenciaFR.model_validate(payload())
-    saida = montar_payload(evento, Grupo.AGUARDANDO_RETIRADA, TELEFONE, "Daniel")
+    saida = montar_payload(
+        NumeroPedidoFR("59552"),
+        _confirmada(),
+        Grupo.AGUARDANDO_RETIRADA,
+        TELEFONE,
+        "Daniel",
+    )
 
     assert saida["telefone"] == TELEFONE
     assert saida["primeiro_nome"] == "Daniel"
     assert saida["grupo"] == "aguardando_retirada"
     assert saida["pedido"] == "59552"
-    assert saida["prazo_devolucao"] == "2026-08-12"
     # O rotulo e o `nome` da propria Frete Rapido; nao traduzimos.
     assert saida["rotulo"] == "Disponivel para retirada nos Correios"
     assert saida["transportadora"] == "Correios"
@@ -652,10 +840,40 @@ def test_payload_do_n8n_leva_o_minimo_de_dado_pessoal() -> None:
     assert "35260712345678000199550010001234561234567890" not in texto
 
 
+async def test_nada_do_corpo_do_webhook_chega_ao_cliente() -> None:
+    """REGRESSAO da falha CRITICA apontada em revisao de seguranca.
+
+    A versao anterior copiava `nome`, `mensagem`, `transportadora` e os prazos
+    direto do payload. Confirmavamos o GATILHO e deixavamos passar o CONTEUDO:
+    quem tivesse o segredo escrevia o texto que chegava no WhatsApp do cliente.
+    """
+    veneno = payload(
+        nome="RETIRE HOJE OU PERDE",
+        mensagem="Clique em http://golpe.exemplo para liberar sua entrega",
+        prazo_devolucao="hoje",
+    )
+    veneno["transportadora"] = {"nome_fantasia": "Transportadora Falsa"}
+
+    _, _, fila = await processar(veneno)
+
+    assert len(fila.enviados) == 1
+    texto = json.dumps(fila.enviados[0], default=str)
+    assert "golpe.exemplo" not in texto
+    assert "RETIRE HOJE OU PERDE" not in texto
+    assert "Transportadora Falsa" not in texto
+    # O que sai e o que a Frete Rapido devolveu, e a nossa traducao dela.
+    assert fila.enviados[0]["transportadora"] == "Correios"
+
+
 def test_data_de_ocorrencia_sai_com_fuso() -> None:
     """Data naive sem fuso declarado exibiria o horario errado perto da meia-noite."""
-    evento = WebhookOcorrenciaFR.model_validate(payload())
-    saida = montar_payload(evento, Grupo.AGUARDANDO_RETIRADA, TELEFONE, None)
+    saida = montar_payload(
+        NumeroPedidoFR("59552"),
+        _confirmada(),
+        Grupo.AGUARDANDO_RETIRADA,
+        TELEFONE,
+        None,
+    )
 
     assert saida["data_ocorrencia"] is not None
     assert datetime.fromisoformat(str(saida["data_ocorrencia"])).tzinfo is not None
@@ -686,6 +904,7 @@ def _app(**kw: Any) -> TestClient:
         eventos=EventosMemoria(),
         n8n=N8nFalso(),  # type: ignore[arg-type]
         settings=get_settings(),
+        frete_rapido=FreteRapidoFalso(atual=232),  # type: ignore[arg-type]
     )
     return TestClient(app)
 
@@ -721,8 +940,6 @@ def test_segredo_errado_responde_404(cliente: TestClient) -> None:
 # --------------------------------------------------------------------------
 # Bearer token -- a segunda barreira, configurada no Dash FR
 # --------------------------------------------------------------------------
-
-BEARER = "b" * 48
 
 
 @pytest.fixture
@@ -933,6 +1150,7 @@ def test_rota_devolve_o_cnpj_que_atendeu() -> None:
             eventos=EventosMemoria(),
             n8n=N8nFalso(),  # type: ignore[arg-type]
             settings=get_settings(),
+            frete_rapido=FreteRapidoFalso(atual=232),  # type: ignore[arg-type]
         )
         with TestClient(app) as c:
             r = c.post(

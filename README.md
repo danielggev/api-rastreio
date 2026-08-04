@@ -132,9 +132,22 @@ cadastros, número de pedido errado no payload.
 
 A confirmação roda **antes** da consulta à Shopify, o que é decisão de
 privacidade além de segurança: não buscamos o telefone de ninguém com base num
-evento que ainda não sabemos se é real. E "não confirmado" vira `pendente`, não
-descarte — se o webhook chegar antes de a leitura refletir o evento, a escada de
-reentrega deles resolve sozinha; um evento forjado, esse sim, nunca confirma.
+evento que ainda não sabemos se é real.
+
+Duas sutilezas que uma revisão de segurança externa expôs, e que valem registro
+porque a versão ingênua de cada uma parecia suficiente:
+
+**A pergunta é sobre o estado ATUAL, não sobre o histórico.** O endpoint devolve
+todas as ocorrências do pedido, então "este código existe?" confirmava para
+sempre um código de dias atrás — bastava reproduzir um "disponível para retirada"
+antigo num pedido já entregue para mandar o cliente à agência à toa. Comparamos
+com `ordenar_desc()[0]`, o mesmo critério de status atual que a página usa.
+
+**O conteúdo da mensagem vem da ocorrência confirmada, nunca do corpo do
+webhook.** A versão anterior confirmava o *gatilho* e copiava `nome`, `mensagem`
+e `transportadora` do payload — quem tivesse o segredo escrevia o texto que
+chegava no WhatsApp do cliente. Hoje o webhook só avisa que algo mudou; tudo que
+o cliente lê sai da API da Frete Rápido, da nossa classificação, ou da Shopify.
 
 **Telefone é recusado, nunca "consertado".** Fixo e celular antigo de 8 dígitos
 viram `sem_contato` em vez de ganharem um nono dígito na marra. Inventar o dígito

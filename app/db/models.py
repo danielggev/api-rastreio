@@ -115,6 +115,19 @@ class EventoFrete(Base):
         DateTime(timezone=True), server_default=func.now(), index=True
     )
     enviado_em: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    # LEASE de processamento. Enquanto estiver no futuro, alguem esta cuidando
+    # deste evento e ninguem mais deve toca-lo.
+    #
+    # Sem isto, `status = pendente` significava duas coisas ao mesmo tempo --
+    # "alguem esta processando" e "pode tentar de novo" -- e duas entregas
+    # simultaneas do mesmo evento passavam as duas, gerando mensagem duplicada.
+    # A restricao UNIQUE arbitra quem cria a LINHA; o lease arbitra quem executa
+    # o EFEITO.
+    #
+    # Expira sozinho: se o processo morrer no meio, a proxima reentrega da Frete
+    # Rapido reassume em vez de o evento ficar preso para sempre.
+    processando_ate: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     # Mensagem ja redigida (`redigir_excecao`), truncada.
     erro: Mapped[str | None] = mapped_column(String(256))
 

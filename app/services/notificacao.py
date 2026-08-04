@@ -24,13 +24,14 @@ de reentrega da propria Frete Rapido (1, 2, 3, 5, 10, 30 min, depois 1, 2, 3, 4,
 
 from __future__ import annotations
 
+import hashlib
 import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from app.config import Settings, get_settings
-from app.schemas import Grupo, StatusEvento, WebhookOcorrenciaFR
+from app.schemas import Grupo, OcorrenciaFR, StatusEvento, WebhookOcorrenciaFR
 from app.services.datas import atribuir_fuso
 from app.services.eventos import ChaveEvento, EventosMemoria, RepositorioEventos
 from app.services.logs import redigir_excecao
@@ -38,12 +39,28 @@ from app.services.multi_cnpj import BuscadorMultiCNPJ
 from app.services.n8n import ClienteN8n, N8nErro
 from app.services.normalizacao import NumeroPedidoErro, NumeroPedidoFR, truncar
 from app.services.ocorrencias import classificar
+from app.services.ordenacao import ordenar_desc
 from app.services.shopify import ClienteShopify, ShopifyErro
 from app.services.transportadora import nome_amigavel
 
 logger = logging.getLogger(__name__)
 
 MAX_ERRO = 256
+
+
+@dataclass(frozen=True)
+class Confirmacao:
+    """Resposta da Frete Rapido sobre um evento recebido.
+
+    Carrega a OCORRENCIA, e nao um booleano, porque e dela que o aviso e
+    montado. O payload do webhook serve para saber que algo mudou; o que se diz
+    ao cliente sai daqui.
+    """
+
+    ocorrencia: OcorrenciaFR | None
+    motivo: str | None = None
+    # Repetir nao mudaria o resultado -- a encomenda ja seguiu adiante.
+    definitivo: bool = False
 
 
 @dataclass(frozen=True)
@@ -82,26 +99,31 @@ class ServicoNotificacao:
         # pulada -- o que so acontece em teste, ou com o interruptor desligado.
         self._frete_rapido = frete_rapido
 
-    async def _confirmado_na_fonte(
+    async def _confirmar(
         self, numero: NumeroPedidoFR, codigo: int, cnpj: str | None
-    ) -> tuple[bool, str | None]:
-        """A Frete Rapido confirma que este pedido tem esta ocorrencia?
+    ) -> Confirmacao:
+        """A ocorrencia ATUAL deste pedido na Frete Rapido, se for a do evento.
 
-        Devolve `(confirmado, motivo_da_falha)`. Falha de comunicacao e
-        confirmacao negativa sao coisas diferentes para quem chama, mas ambas
-        impedem o envio.
+        Uma versao anterior perguntava apenas "este codigo existe no historico?".
+        Nao bastava, e revisao de seguranca externa mostrou o furo: o endpoint
+        devolve o HISTORICO, entao um codigo de dias atras confirmava para
+        sempre. Bastava reproduzir um evento antigo de "disponivel para retirada"
+        num pedido ja entregue para mandar o cliente a agencia a toa.
 
-        Casamos apenas o CODIGO, nao a data. Nao e concessao: a pergunta que
-        importa e "esta encomenda esta mesmo aguardando retirada AGORA?". Se a
-        Frete Rapido diz que sim, a mensagem e verdadeira -- independente de o
-        webhook ter sido genuino ou reproduzido por alguem. O dano que estamos
-        evitando e a mensagem FALSA, e casar so o codigo ja o elimina.
-        Exigir data exata acrescentaria pouco e criaria uma dependencia fragil
-        entre dois endpoints que podem formatar o instante de forma diferente --
-        se divergissem, NENHUM aviso sairia, e em silencio.
+        A pergunta certa e sobre o ESTADO ATUAL: `ordenar_desc()[0]` e o status
+        corrente, o mesmo criterio que a pagina de rastreio usa. So avisamos se a
+        encomenda esta AGORA no estado que o evento afirma.
+
+        A distincao entre os dois "nao" tambem importa:
+
+        - codigo AUSENTE do historico -> ou o evento e falso, ou a leitura ainda
+          nao propagou. Nao da para saber, entao pedimos reenvio (`definitivo`
+          falso) e deixamos a escada da Frete Rapido resolver.
+        - codigo PRESENTE, mas nao e o atual -> a encomenda seguiu adiante.
+          Repetir nunca vai mudar isso: encerramos (`definitivo`).
         """
         if self._frete_rapido is None:
-            return True, None
+            return Confirmacao(ocorrencia=None, motivo="verificacao indisponivel")
 
         # `buscar_no_cnpj` e nao `buscar`: aqui NAO pode haver fallback para os
         # outros tokens. Ver a justificativa no proprio metodo -- em resumo, o
@@ -110,15 +132,26 @@ class ServicoNotificacao:
         try:
             resultado = await self._frete_rapido.buscar_no_cnpj(numero, cnpj)
         except Exception as exc:
-            return False, truncar(redigir_excecao(exc), MAX_ERRO)
+            return Confirmacao(None, truncar(redigir_excecao(exc), MAX_ERRO))
 
-        if resultado.houve_falha and not resultado.ocorrencias:
-            return False, "falha ao consultar a Frete Rapido para confirmar"
+        if not resultado.ocorrencias:
+            if resultado.houve_falha:
+                return Confirmacao(None, "falha ao consultar a Frete Rapido")
+            return Confirmacao(None, "pedido sem ocorrencias na Frete Rapido")
+
+        atual = ordenar_desc(resultado.ocorrencias)[0]
+        if atual.codigo == codigo:
+            return Confirmacao(atual)
 
         if any(o.codigo == codigo for o in resultado.ocorrencias):
-            return True, None
+            return Confirmacao(
+                None,
+                f"ocorrencia {codigo} existe no historico mas o estado atual e "
+                f"{atual.codigo}: a encomenda seguiu adiante",
+                definitivo=True,
+            )
 
-        return False, f"ocorrencia {codigo} nao confirmada na Frete Rapido"
+        return Confirmacao(None, f"ocorrencia {codigo} nao existe na Frete Rapido")
 
     # ------------------------------------------------------------------
     # Decisao de gatilho
@@ -176,33 +209,57 @@ class ServicoNotificacao:
             )
             return Desfecho(StatusEvento.DESCARTADO, grupo)
 
-        # 2. Reserva. Um status terminal ja gravado significa que este evento ja
-        # foi resolvido: e uma reentrega da FR, e responder 200 a encerra.
-        existente = await self._eventos.reservar(chave, grupo, cnpj=cnpj)
-        if existente is not None and existente is not StatusEvento.PENDENTE:
+        # 2. Assumir o evento: lease + cota, numa transacao so.
+        #
+        # O lease existe porque `pendente` significava duas coisas ao mesmo
+        # tempo -- "alguem esta processando" e "pode tentar de novo" -- e duas
+        # entregas simultaneas passavam as duas, gerando mensagem duplicada. A
+        # restricao UNIQUE arbitra quem cria a LINHA; o lease, quem executa o
+        # EFEITO.
+        #
+        # A cota entra aqui, e nao depois, porque conta-la fora da transacao
+        # deixava N corridas simultaneas verem zero e todas enviarem.
+        desde = datetime.now(UTC) - timedelta(hours=self._s.notificacao_janela_horas)
+        reserva = await self._eventos.adquirir(
+            chave,
+            grupo,
+            cnpj=cnpj,
+            lease_s=self._s.notificacao_lease_s,
+            desde=desde,
+            max_avisos=self._s.notificacao_max_por_pedido,
+            max_tentativas=self._s.notificacao_max_tentativas_pedido,
+        )
+
+        if reserva.status is not None:
             logger.info(
                 "evento repetido do pedido %s (codigo %s): ja estava %s",
                 numero,
                 evento.codigo,
-                existente.value,
+                reserva.status.value,
             )
-            return Desfecho(existente, grupo, "reentrega")
+            return Desfecho(reserva.status, grupo, "reentrega")
 
-        # 3. Trava anti-spam. Vale por pedido, nao por evento: uma transportadora
-        # que posta cinco codigos em sequencia nao pode virar cinco mensagens.
-        # Tambem e o limitador de estrago caso o segredo da rota vaze.
-        desde = datetime.now(UTC) - timedelta(hours=self._s.notificacao_janela_horas)
-        recentes = await self._eventos.contar_avisos(str(numero), desde)
-        if recentes >= self._s.notificacao_max_por_pedido:
+        if reserva.em_andamento:
+            # Outro processo tem o lease. Encerrar com 200 e nao duplicar: quem
+            # esta com ele conclui, e um 503 so provocaria mais reentregas.
+            logger.info(
+                "evento do pedido %s (codigo %s) ja esta sendo processado",
+                numero,
+                evento.codigo,
+            )
+            return Desfecho(StatusEvento.DESCARTADO, grupo, "ja em processamento")
+
+        if reserva.cota_excedida:
             motivo = (
-                f"limite anti-spam: {recentes} aviso(s) em "
+                f"limite anti-spam: {reserva.avisos_recentes} aviso(s) e "
+                f"{reserva.tentativas_recentes} tentativa(s) em "
                 f"{self._s.notificacao_janela_horas}h"
             )
             logger.warning("aviso contido para o pedido %s -- %s", numero, motivo)
             await self._eventos.concluir(chave, StatusEvento.DESCARTADO, motivo)
             return Desfecho(StatusEvento.DESCARTADO, grupo, motivo)
 
-        # 4. Confirmar na FONTE, antes de tocar em dado do cliente.
+        # 3. Confirmar na FONTE, antes de tocar em dado do cliente.
         #
         # A ordem importa em dois sentidos. Primeiro, seguranca: o segredo da URL
         # prova que quem chamou o conhece, nao que o evento aconteceu -- so a
@@ -210,26 +267,30 @@ class ServicoNotificacao:
         # buscamos o telefone de ninguem com base num evento que ainda nao
         # sabemos se e real.
         #
-        # Nao confirmado vira PENDENTE, e nao descarte: o webhook pode chegar
-        # antes de a leitura refletir o evento, e a escada de reentrega da propria
-        # Frete Rapido (1, 2, 3, 5, 10 min...) resolve isso sozinha. Um evento
-        # forjado, esse sim, nunca confirma -- esgota as tentativas e fica
-        # visivel no relatorio 13 em vez de virar mensagem.
+        # A ocorrencia devolvida aqui e a UNICA fonte do que sera dito ao
+        # cliente. O corpo do webhook apenas avisa que algo mudou.
+        confirmada: OcorrenciaFR | None = None
         if self._s.notificacao_verificar_na_fonte:
-            confirmado, porque = await self._confirmado_na_fonte(
-                numero, evento.codigo, cnpj
-            )
-            if not confirmado:
+            conf = await self._confirmar(numero, evento.codigo, cnpj)
+            if conf.ocorrencia is None:
                 logger.warning(
                     "evento do pedido %s (codigo %s) nao confirmado na fonte: %s",
                     numero,
                     evento.codigo,
-                    porque,
+                    conf.motivo,
                 )
-                await self._eventos.concluir(chave, StatusEvento.PENDENTE, porque)
-                return Desfecho(StatusEvento.PENDENTE, grupo, porque)
+                # `definitivo` = a encomenda seguiu adiante; repetir nao muda
+                # nada, entao encerra com 200 em vez de pedir reenvio.
+                final = (
+                    StatusEvento.DESCARTADO
+                    if conf.definitivo
+                    else StatusEvento.PENDENTE
+                )
+                await self._eventos.concluir(chave, final, conf.motivo)
+                return Desfecho(final, grupo, conf.motivo)
+            confirmada = conf.ocorrencia
 
-        # 5. Shopify: e aqui que o payload nao confiavel encontra a realidade.
+        # 4. Shopify: e aqui que o payload nao confiavel encontra a realidade.
         try:
             pedido = await self._shopify.buscar_pedido(numero)
         except ShopifyErro as exc:
@@ -256,7 +317,7 @@ class ServicoNotificacao:
             await self._eventos.concluir(chave, StatusEvento.SEM_CONTATO)
             return Desfecho(StatusEvento.SEM_CONTATO, grupo)
 
-        # 6. Interruptor geral. Ate aqui tudo rodou de verdade -- inclusive a
+        # 5. Interruptor geral. Ate aqui tudo rodou de verdade -- inclusive a
         # confirmacao na fonte e a consulta a Shopify -- e e isso que da a
         # medicao real da Fase 1.
         if not self._s.notificacao_ativa:
@@ -269,8 +330,13 @@ class ServicoNotificacao:
             )
             return Desfecho(StatusEvento.OBSERVADO, grupo)
 
-        # 7. Entrega.
-        payload = montar_payload(evento, grupo, pedido.telefone, pedido.nome_cliente)
+        # 6. Entrega. `confirmada` so e nula com a verificacao desligada -- o
+        # interruptor de emergencia. Nesse modo o webhook volta a ser a fonte,
+        # com a ressalva que isso carrega.
+        ocorrencia = confirmada or _da_webhook(evento)
+        payload = montar_payload(
+            numero, ocorrencia, grupo, pedido.telefone, pedido.nome_cliente
+        )
         try:
             await self._n8n.enviar(payload)
         except N8nErro as exc:
@@ -289,34 +355,92 @@ class ServicoNotificacao:
         return Desfecho(StatusEvento.ENVIADO, grupo)
 
 
+def chave_idempotencia(numero: NumeroPedidoFR, ocorrencia: OcorrenciaFR) -> str:
+    """Identidade estavel de um aviso, para o n8n recusar repeticoes.
+
+    Derivada da ocorrencia CONFIRMADA, nunca do corpo do webhook: se viesse de
+    la, bastaria variar um campo para gerar chave nova e furar a protecao --
+    exatamente o que a chave existe para impedir.
+    """
+    data = atribuir_fuso(ocorrencia.data_ocorrencia)
+    bruto = f"{numero}|{ocorrencia.codigo}|{data.isoformat() if data else ''}"
+    return hashlib.sha256(bruto.encode()).hexdigest()[:32]
+
+
+def _da_webhook(evento: WebhookOcorrenciaFR) -> OcorrenciaFR:
+    """Converte o payload do webhook numa ocorrencia, SEM confirmacao.
+
+    So e usado com `NOTIFICACAO_VERIFICAR_NA_FONTE=false`, o interruptor de
+    emergencia. Nesse modo o conteudo da mensagem volta a vir de quem chamou a
+    rota -- e por isso o interruptor nao deveria conviver com o envio ligado
+    (ver a validacao de boot em `config.py`).
+    """
+    return OcorrenciaFR(
+        codigo=evento.codigo,
+        nome=evento.nome,
+        mensagem=evento.mensagem,
+        data_ocorrencia=evento.data_ocorrencia,
+        razao_social_transportadora=evento.nome_transportadora,
+    )
+
+
 def montar_payload(
-    evento: WebhookOcorrenciaFR,
+    numero: NumeroPedidoFR,
+    ocorrencia: OcorrenciaFR,
     grupo: Grupo,
     telefone: str,
     nome_cliente: str | None,
 ) -> dict[str, Any]:
-    """Contrato com o n8n.
+    """Contrato com o n8n, montado SEM nenhum campo do corpo do webhook.
 
-    Deliberadamente MINIMO no que e dado pessoal -- telefone e primeiro nome, e
-    nada mais. O n8n retem os dados de execucao no banco dele, entao tudo que
-    sai daqui fica fora do alcance de `scripts/expurgar.py`.
+    Esta assinatura e a correcao de uma falha real, apontada em revisao de
+    seguranca: a versao anterior recebia o `WebhookOcorrenciaFR` e copiava
+    `nome`, `mensagem`, `transportadora` e os prazos direto dele. Confirmavamos
+    o GATILHO e deixavamos passar o CONTEUDO -- quem tivesse o segredo escrevia
+    o texto que chegava no WhatsApp do cliente.
 
-    `rotulo` e o campo `nome` da propria Frete Rapido, NAO traduzido: mesma
-    regra de `ocorrencias.py`. O catalogo muda sozinho e sempre em portugues
-    legivel; uma traducao nossa envelheceria.
+    Agora tudo vem de uma de tres origens confiaveis: a ocorrencia devolvida
+    pela API da Frete Rapido, a nossa propria classificacao, ou a Shopify
+    (telefone e nome). O webhook so avisa que algo mudou.
+
+    `prazo_devolucao` saiu do contrato por isso: so existia no corpo do webhook,
+    e nao ha como confirma-lo. O texto do n8n perde o "ate dia X" e ganha
+    "quanto antes" -- menos especifico, e verdadeiro. Se a data virar importante,
+    precisa de uma fonte verificavel, nao do payload.
+
+    Segue MINIMO em dado pessoal: telefone e primeiro nome, nada mais. O n8n
+    retem os dados de execucao no banco dele, fora do alcance de
+    `scripts/expurgar.py`.
     """
-    data = atribuir_fuso(evento.data_ocorrencia)
+    data = atribuir_fuso(ocorrencia.data_ocorrencia)
     return {
         "evento": "acao_necessaria",
+        # Chave ESTAVEL da ocorrencia confirmada. Existe porque a entrega ao n8n
+        # e "ao menos uma vez", nao "exatamente uma": se ele aceitar o POST e
+        # disparar o WhatsApp mas a resposta HTTP se perder, nos entendemos como
+        # falha e tentamos de novo. Do lado de ca nao ha como distinguir "nao
+        # recebeu" de "recebeu e a confirmacao sumiu".
+        #
+        # O fluxo do n8n DEVE registrar esta chave e recusar repetidas ANTES de
+        # chamar o WhatsApp. Sem isso, o teto anti-spam continua valendo, mas a
+        # duplicata deixa de ser impossivel e passa a ser apenas improvavel.
+        "idempotencia": chave_idempotencia(numero, ocorrencia),
         "grupo": grupo.value,
-        "pedido": evento.numero_pedido,
-        "codigo": evento.codigo,
-        "rotulo": evento.nome,
-        "mensagem": evento.mensagem,
-        "transportadora": nome_amigavel(evento.nome_transportadora),
+        # Numero JA normalizado, nao a string crua do payload.
+        "pedido": str(numero),
+        "codigo": ocorrencia.codigo,
+        # O `nome` da propria Frete Rapido, NAO traduzido: mesma regra de
+        # `ocorrencias.py`. O catalogo muda sozinho e sempre em portugues
+        # legivel; uma traducao nossa envelheceria.
+        "rotulo": ocorrencia.nome,
+        "descricao": ocorrencia.descricao,
+        "transportadora": nome_amigavel(ocorrencia.razao_social_transportadora),
+        "previsao_entrega": (
+            ocorrencia.data_prevista_entrega.isoformat()
+            if ocorrencia.data_prevista_entrega
+            else None
+        ),
         "telefone": telefone,
         "primeiro_nome": nome_cliente,
-        "prazo_devolucao": evento.prazo_devolucao,
-        "prazo_entrega_consumidor": evento.prazo_entrega_consumidor,
         "data_ocorrencia": data.isoformat() if data else None,
     }
