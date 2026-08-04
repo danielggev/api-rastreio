@@ -103,12 +103,12 @@ class ServicoNotificacao:
         if self._frete_rapido is None:
             return True, None
 
-        # A tag da consulta e o proprio CNPJ do cadastro: ja sabemos qual token
-        # usar, sem depender das tags da Shopify. Vazio cai no caminho seguro do
-        # buscador, que consulta todos em paralelo.
-        tags = [cnpj] if cnpj else []
+        # `buscar_no_cnpj` e nao `buscar`: aqui NAO pode haver fallback para os
+        # outros tokens. Ver a justificativa no proprio metodo -- em resumo, o
+        # fallback multiplicava por 3 o custo de um evento forjado (na mesma cota
+        # que a pagina de rastreio usa) e furava o isolamento entre os CNPJs.
         try:
-            resultado = await self._frete_rapido.buscar(numero, tags)
+            resultado = await self._frete_rapido.buscar_no_cnpj(numero, cnpj)
         except Exception as exc:
             return False, truncar(redigir_excecao(exc), MAX_ERRO)
 

@@ -60,6 +60,50 @@ class BuscadorMultiCNPJ:
                 return tag
         return None
 
+    async def buscar_no_cnpj(
+        self, numero: NumeroPedidoFR, cnpj: str | None
+    ) -> ResultadoBusca:
+        """Consulta APENAS o token do CNPJ indicado. Sem fallback, de proposito.
+
+        Existe para a confirmacao do webhook, onde o CNPJ vem do segredo da URL
+        e nao de uma tag digitada. Reusar o `buscar` aqui era nocivo em dois
+        sentidos:
+
+        1. **Custo.** Pedido inexistente devolve vazio no primeiro token e cai no
+           fallback, consultando os outros dois. Um evento forjado custava 3
+           chamadas -- e a cota da Frete Rapido (720/min) e COMPARTILHADA com a
+           pagina de rastreio. Bastava repetir eventos forjados para saturar a
+           cota e derrubar o fluxo principal.
+        2. **Isolamento.** O fallback anulava o motivo de existir um segredo por
+           cadastro: o segredo vazado do CNPJ A confirmaria pedidos de B e C.
+
+        No fluxo de CONSULTA o fallback continua certo -- la a tag pode estar
+        errada, e o custo de errar e responder "nao despachado" para um pedido
+        que existe. Aqui a identidade e criptografica, nao um rotulo digitado.
+        """
+        if cnpj:
+            token = self._tokens.get(cnpj)
+            if token is None:
+                # Chave de FR_WEBHOOK_SEGREDOS que nao existe em
+                # FRETE_RAPIDO_TOKENS. Falhar alto: confirmar por outro token
+                # seria exatamente o furo de isolamento que este metodo evita.
+                raise FreteRapidoErro(
+                    f"CNPJ {cnpj!r} nao tem token configurado "
+                    "(FR_WEBHOOK_SEGREDOS e FRETE_RAPIDO_TOKENS divergem)"
+                )
+            return await self._buscar_em_um(numero, cnpj, token, [])
+
+        # Sem CNPJ identificado (segredo avulso, sem separacao por cadastro).
+        # So da para confirmar com seguranca quando nao ha o que escolher.
+        if len(self._tokens) == 1:
+            ((unico, token),) = self._tokens.items()
+            return await self._buscar_em_um(numero, unico, token, [])
+
+        raise FreteRapidoErro(
+            "evento sem CNPJ identificado e ha mais de um token configurado: "
+            "use FR_WEBHOOK_SEGREDOS, um segredo por CNPJ"
+        )
+
     async def buscar(
         self, numero: NumeroPedidoFR, tags: list[str] | None = None
     ) -> ResultadoBusca:

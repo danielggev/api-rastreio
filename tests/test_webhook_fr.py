@@ -22,7 +22,7 @@ from app.config import Settings
 from app.main import criar_app
 from app.schemas import Grupo, OcorrenciaFR, StatusEvento, WebhookOcorrenciaFR
 from app.services.eventos import EventosMemoria
-from app.services.multi_cnpj import ResultadoBusca
+from app.services.multi_cnpj import BuscadorMultiCNPJ, ResultadoBusca
 from app.services.normalizacao import NumeroPedidoFR
 from app.services.notificacao import ServicoNotificacao, montar_payload
 from app.services.shopify import PedidoShopify, ShopifyErro
@@ -85,12 +85,14 @@ class FreteRapidoFalso:
         self._codigos = CONFIRMA_TUDO if codigos is None else codigos
         self._erro = erro
         self._houve_falha = houve_falha
-        self.tags_recebidas: list[list[str]] = []
+        # Cada consulta feita, com o CNPJ pedido. A confirmacao NAO pode
+        # consultar mais de um token por evento.
+        self.consultas: list[str | None] = []
 
-    async def buscar(
-        self, numero: NumeroPedidoFR, tags: list[str] | None = None
+    async def buscar_no_cnpj(
+        self, numero: NumeroPedidoFR, cnpj: str | None
     ) -> ResultadoBusca:
-        self.tags_recebidas.append(list(tags or []))
+        self.consultas.append(cnpj)
         if self._erro is not None:
             raise self._erro
         return ResultadoBusca(
@@ -475,7 +477,88 @@ async def test_confirmacao_usa_o_token_do_cnpj_que_recebeu_o_evento() -> None:
 
     await svc.processar(WebhookOcorrenciaFR.model_validate(payload()), cnpj="melhores")
 
-    assert fr.tags_recebidas == [["melhores"]]
+    # UMA consulta, e no CNPJ certo. Ver o teste de amplificacao abaixo.
+    assert fr.consultas == ["melhores"]
+
+
+class ClienteFRContador:
+    """Conta chamadas por token, para medir a amplificacao real."""
+
+    def __init__(self) -> None:
+        self.tokens_consultados: list[str] = []
+
+    async def buscar_ocorrencias(
+        self, numero: NumeroPedidoFR, token: str
+    ) -> list[OcorrenciaFR]:
+        self.tokens_consultados.append(token)
+        return []  # pedido inexistente: e o caso que disparava o fallback
+
+
+async def test_confirmacao_nao_consulta_os_outros_CNPJs() -> None:
+    """REGRESSAO da amplificacao de cota apontada em revisao de seguranca.
+
+    `buscar()` cai no fallback quando o token indicado volta vazio, consultando
+    os outros dois. Um evento forjado para pedido inexistente custava 3 chamadas
+    -- e a cota da Frete Rapido (720/min) e a MESMA da pagina de rastreio.
+    Repetir eventos forjados no teto da rota (300/min) daria 900 chamadas/min e
+    derrubaria o fluxo principal.
+
+    O fallback tambem furava o isolamento: segredo vazado do CNPJ A confirmando
+    pedidos de B e C.
+    """
+    cliente = ClienteFRContador()
+    buscador = BuscadorMultiCNPJ(
+        cliente,  # type: ignore[arg-type]
+        {"grudado": "tok-g", "melhores": "tok-m", "tudo": "tok-t"},
+    )
+
+    await buscador.buscar_no_cnpj(NumeroPedidoFR("59552"), "melhores")
+
+    assert cliente.tokens_consultados == ["tok-m"]
+
+
+async def test_consulta_do_cliente_MANTEM_o_fallback() -> None:
+    """O fluxo da pagina e outro caso: ali a tag pode estar errada, e o custo de
+    confiar cegamente e responder "nao despachado" para um pedido que existe."""
+    cliente = ClienteFRContador()
+    buscador = BuscadorMultiCNPJ(
+        cliente,  # type: ignore[arg-type]
+        {"grudado": "tok-g", "melhores": "tok-m", "tudo": "tok-t"},
+    )
+
+    await buscador.buscar(NumeroPedidoFR("59552"), ["melhores"])
+
+    assert len(cliente.tokens_consultados) == 3
+
+
+async def test_cnpj_sem_token_configurado_falha_alto() -> None:
+    """`FR_WEBHOOK_SEGREDOS` e `FRETE_RAPIDO_TOKENS` divergindo.
+
+    Confirmar por outro token seria exatamente o furo de isolamento que este
+    caminho existe para fechar -- melhor recusar e aparecer no relatorio.
+    """
+    from app.services.frete_rapido import FreteRapidoErro
+
+    buscador = BuscadorMultiCNPJ(
+        ClienteFRContador(),  # type: ignore[arg-type]
+        {"grudado": "tok-g", "melhores": "tok-m"},
+    )
+
+    with pytest.raises(FreteRapidoErro, match="nao tem token configurado"):
+        await buscador.buscar_no_cnpj(NumeroPedidoFR("59552"), "tudo")
+
+
+async def test_sem_cnpj_com_varios_tokens_recusa_confirmar() -> None:
+    """Segredo avulso com 3 CNPJs: nao ha como escolher sem adivinhar."""
+    from app.services.frete_rapido import FreteRapidoErro
+
+    buscador = BuscadorMultiCNPJ(
+        ClienteFRContador(),  # type: ignore[arg-type]
+        {"grudado": "tok-g", "melhores": "tok-m"},
+    )
+
+    with pytest.raises(FreteRapidoErro, match="sem CNPJ identificado"):
+        await buscador.buscar_no_cnpj(NumeroPedidoFR("59552"), None)
 
 
 async def test_verificacao_desligada_pula_a_consulta() -> None:
@@ -489,7 +572,7 @@ async def test_verificacao_desligada_pula_a_consulta() -> None:
 
     assert desfecho.status is StatusEvento.ENVIADO
     assert len(fila.enviados) == 1
-    assert fr.tags_recebidas == []
+    assert fr.consultas == []
 
 
 async def test_confirmacao_roda_antes_do_interruptor_de_envio() -> None:
@@ -507,7 +590,7 @@ async def test_confirmacao_roda_antes_do_interruptor_de_envio() -> None:
 
     assert desfecho.status is StatusEvento.OBSERVADO
     assert fila.enviados == []
-    assert fr.tags_recebidas == [[]]
+    assert fr.consultas == [None]
 
 
 # --------------------------------------------------------------------------
