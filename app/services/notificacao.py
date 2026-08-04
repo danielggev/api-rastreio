@@ -281,15 +281,21 @@ class ServicoNotificacao:
             return Desfecho(StatusEvento.PENDENTE, grupo, motivo)
 
         if reserva.custo_excedido:
+            # PENDENTE, e nao descarte. Este teto existe para conter CUSTO, e o
+            # evento que esbarra nele provavelmente e legitimo -- um pedido com
+            # muita movimentacao, ou a vitima de alguem enchendo a cota dele de
+            # proposito. Encerrar com 200 permitiria silenciar os avisos de um
+            # pedido escolhido por 6 horas.
+            #
+            # Com 503 a Frete Rapido reapresenta mais tarde, quando a janela ja
+            # deslizou. E a checagem acontece ANTES da confirmacao, entao repetir
+            # nao custa chamada a eles.
             motivo = (
                 f"teto de tentativas do pedido: {reserva.tentativas_recentes} em "
                 f"{self._s.notificacao_janela_horas}h"
             )
-            logger.warning("evento contido no pedido %s -- %s", numero, motivo)
-            await self._eventos.concluir(
-                chave, StatusEvento.DESCARTADO, motivo, dono=dono
-            )
-            return Desfecho(StatusEvento.DESCARTADO, grupo, motivo)
+            logger.warning("evento adiado no pedido %s -- %s", numero, motivo)
+            return Desfecho(StatusEvento.PENDENTE, grupo, motivo)
 
         # 3. Confirmar na FONTE, antes de tocar em dado do cliente.
         #
@@ -331,8 +337,27 @@ class ServicoNotificacao:
             desde=desde,
             desde_volume=agora
             - timedelta(minutes=self._s.notificacao_janela_volume_min),
+            desde_hora=agora - timedelta(hours=1),
             max_avisos=self._s.notificacao_max_por_pedido,
+            cnpj=cnpj,
+            max_global=self._s.notificacao_max_global_hora,
+            max_cnpj=self._s.notificacao_max_cnpj_hora,
         )
+        if vaga.limite_sistemico is not None:
+            # Disjuntor. ADIA, nao descarta: as demais travas sao por pedido, e
+            # esta pega o padrao que elas nao veem -- avisos espalhados por
+            # muitos pedidos. Uma rajada legitima acima do teto sai mais tarde,
+            # em vez de sumir.
+            #
+            # WARNING de proposito: se isto disparar em operacao normal, o teto
+            # esta baixo demais e precisa ser recalibrado com o relatorio 10.
+            logger.warning(
+                "DISJUNTOR de avisos acionado (%s); pedido %s adiado",
+                vaga.limite_sistemico,
+                numero,
+            )
+            return Desfecho(StatusEvento.PENDENTE, grupo, vaga.limite_sistemico)
+
         if not vaga.concedida:
             if vaga.codigo_repetido:
                 # Nao e excesso, e repeticao do mesmo fato -- tipicamente uma

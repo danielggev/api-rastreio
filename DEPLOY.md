@@ -609,6 +609,8 @@ eventos continuam sendo gravados; nada é enviado.
 |---|---|
 | `sem_contato` alto | O telefone da Shopify não basta — avaliar a segunda fonte (`GET quote/{id_frete}`) |
 | `pendente` há mais de 24 h | A Frete Rápido esgotou as 12 tentativas e o aviso **não saiu**. Ver a coluna `erro` |
+| `DISJUNTOR de avisos acionado` | Volume acima do teto por hora. Os eventos são **adiados**, não perdidos — mas se aparecer em operação normal, `NOTIFICACAO_MAX_GLOBAL_HORA` / `NOTIFICACAO_MAX_CNPJ_HORA` estão baixos demais |
+| `evento adiado ... teto de tentativas` | Um pedido acumulou muitas tentativas na janela. Normal em pedido com muitos volumes; se persistir, pode ser alguém enchendo a cota daquele pedido de propósito |
 | `limite anti-spam` no log | Rajada de códigos no mesmo pedido, ou segredo vazado |
 | `webhook para pedido inexistente` | Webhook forjado, ou pedido com mais de 60 dias (some da API da Shopify) |
 | 429 na rota do webhook | `RATE_LIMIT_WEBHOOK` baixo demais. A FR reenvia, mas o aviso atrasa |

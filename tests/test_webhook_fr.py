@@ -786,6 +786,116 @@ async def test_evento_forjado_nao_ocupa_vaga_de_aviso() -> None:
     assert len(fila.enviados) == 1
 
 
+async def test_teto_de_tentativas_ADIA_em_vez_de_descartar() -> None:
+    """Nao encerrar com 200: isso permitiria silenciar um pedido escolhido.
+
+    O teto existe para conter CUSTO. Quem esbarra nele geralmente e legitimo --
+    pedido com muita movimentacao, ou a vitima de alguem enchendo a cota dele de
+    proposito. Com 503 a Frete Rapido reapresenta quando a janela deslizar.
+    """
+    fr = FreteRapidoFalso(atual=2)  # nunca confirma: acumula pendentes
+    svc, _, _ = servico(fr=fr, s=settings(notificacao_max_tentativas_pedido=3))
+
+    for d in range(1, 6):
+        await svc.processar(
+            WebhookOcorrenciaFR.model_validate(
+                payload(data_ocorrencia=f"2026-08-0{d} 09:00:00")
+            )
+        )
+
+    # O evento que esbarra no teto pede reenvio, nao vira desfecho terminal.
+    desfecho = await svc.processar(
+        WebhookOcorrenciaFR.model_validate(
+            payload(data_ocorrencia="2026-08-07 09:00:00")
+        )
+    )
+
+    assert desfecho.status is StatusEvento.PENDENTE
+    assert desfecho.status_http == 503
+    assert "teto de tentativas" in (desfecho.detalhe or "")
+
+
+async def test_teto_de_tentativas_nao_consulta_a_frete_rapido() -> None:
+    """A checagem vem ANTES da confirmacao: repetir nao custa chamada a eles.
+
+    E o que torna seguro devolver 503 aqui em vez de encerrar.
+    """
+    fr = FreteRapidoFalso(atual=2)
+    svc, _, _ = servico(fr=fr, s=settings(notificacao_max_tentativas_pedido=2))
+
+    for d in range(1, 4):
+        await svc.processar(
+            WebhookOcorrenciaFR.model_validate(
+                payload(data_ocorrencia=f"2026-08-0{d} 09:00:00")
+            )
+        )
+    antes = len(fr.consultas)
+
+    for _ in range(5):
+        await svc.processar(
+            WebhookOcorrenciaFR.model_validate(
+                payload(data_ocorrencia="2026-08-09 09:00:00")
+            )
+        )
+
+    assert len(fr.consultas) == antes
+
+
+async def test_disjuntor_por_CNPJ_adia_a_rajada() -> None:
+    """As demais travas sao por PEDIDO e nao veem avisos espalhados.
+
+    Quem tiver os segredos podia disparar avisos legitimos em muitos pedidos
+    diferentes, tres em cada, sem esbarrar em nada.
+    """
+    svc, _, fila = servico(s=settings(notificacao_max_cnpj_hora=2))
+
+    desfechos = []
+    for pedido_num in range(60001, 60007):
+        evento = WebhookOcorrenciaFR.model_validate(
+            payload(numero_pedido=str(pedido_num))
+        )
+        desfechos.append(await svc.processar(evento, cnpj="grudado"))
+
+    assert len(fila.enviados) == 2
+    # Os demais foram ADIADOS, nao descartados: a rajada pode ser legitima.
+    assert all(d.status is StatusEvento.PENDENTE for d in desfechos[2:])
+    assert all(d.status_http == 503 for d in desfechos[2:])
+
+
+async def test_disjuntor_de_um_CNPJ_nao_bloqueia_os_outros() -> None:
+    """Confinamento: segredo vazado de um CNPJ nao cala a operacao inteira."""
+    svc, _, fila = servico(s=settings(notificacao_max_cnpj_hora=1))
+
+    for pedido_num in (60001, 60002, 60003):
+        await svc.processar(
+            WebhookOcorrenciaFR.model_validate(payload(numero_pedido=str(pedido_num))),
+            cnpj="grudado",
+        )
+    assert len(fila.enviados) == 1
+
+    outro = await svc.processar(
+        WebhookOcorrenciaFR.model_validate(payload(numero_pedido="70001")),
+        cnpj="melhores",
+    )
+
+    assert outro.status is StatusEvento.ENVIADO
+    assert len(fila.enviados) == 2
+
+
+async def test_disjuntor_global_vale_acima_dos_CNPJs() -> None:
+    svc, _, fila = servico(
+        s=settings(notificacao_max_global_hora=2, notificacao_max_cnpj_hora=99)
+    )
+
+    for i, cnpj in enumerate(["grudado", "melhores", "tudo", "grudado"]):
+        await svc.processar(
+            WebhookOcorrenciaFR.model_validate(payload(numero_pedido=str(60001 + i))),
+            cnpj=cnpj,
+        )
+
+    assert len(fila.enviados) == 2
+
+
 async def test_nao_confirmado_e_PENDENTE_e_nao_descarte() -> None:
     """O webhook pode chegar antes de a leitura refletir o evento.
 

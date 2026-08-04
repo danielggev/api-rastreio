@@ -42,6 +42,10 @@ logger = logging.getLogger(__name__)
 # o volume da Fase 2, em vez de subestima-lo.
 _CONTAM_COMO_AVISO = (StatusEvento.ENVIADO, StatusEvento.OBSERVADO)
 
+# Sentinela para "nao filtrar por CNPJ". `None` nao serve: e um CNPJ valido
+# (eventos que chegaram pelo segredo avulso) e precisa de teto proprio.
+_SEM_FILTRO: str = "\x00__todos__"
+
 
 @dataclass(frozen=True)
 class ChaveEvento:
@@ -97,6 +101,10 @@ class ReservaAviso:
     # agregacao de volume. Separado de `cota_excedida` porque o motivo e outro:
     # aqui nao houve excesso, houve repeticao do mesmo fato.
     codigo_repetido: bool = False
+    # Disjuntor sistemico (global ou do CNPJ). NAO e caso de descarte: o evento
+    # provavelmente e legitimo e so chegou numa rajada. Quem chama responde 503
+    # para a Frete Rapido reapresentar depois.
+    limite_sistemico: str | None = None
     avisos_recentes: int = 0
 
 
@@ -120,7 +128,11 @@ class RepositorioEventos(Protocol):
         *,
         desde: datetime,
         desde_volume: datetime,
+        desde_hora: datetime,
         max_avisos: int,
+        cnpj: str | None = None,
+        max_global: int,
+        max_cnpj: int,
     ) -> ReservaAviso: ...
 
     async def renovar(
@@ -156,6 +168,7 @@ class _Linha:
     dono: str | None = None
     proxima_tentativa_em: datetime | None = None
     aviso_reservado_em: datetime | None = None
+    cnpj: str | None = None
 
 
 class EventosMemoria:
@@ -205,6 +218,7 @@ class EventosMemoria:
             dono=dono,
             proxima_tentativa_em=agora + timedelta(seconds=cooldown_s),
             aviso_reservado_em=linha.aviso_reservado_em if linha else None,
+            cnpj=cnpj if cnpj is not None else (linha.cnpj if linha else None),
         )
         return Reserva(adquirida=True)
 
@@ -214,7 +228,11 @@ class EventosMemoria:
         *,
         desde: datetime,
         desde_volume: datetime,
+        desde_hora: datetime,
         max_avisos: int,
+        cnpj: str | None = None,
+        max_global: int,
+        max_cnpj: int,
     ) -> ReservaAviso:
         linha = self._linhas.get(chave)
         if linha is not None and linha.aviso_reservado_em is not None:
@@ -230,9 +248,35 @@ class EventosMemoria:
         if avisos >= max_avisos:
             return ReservaAviso(cota_excedida=True, avisos_recentes=avisos)
 
+        no_cnpj = self._contar_na_hora(desde_hora, cnpj=cnpj)
+        if no_cnpj >= max_cnpj:
+            return ReservaAviso(
+                limite_sistemico=f"CNPJ {cnpj or '(sem id)'}: {no_cnpj} avisos/h",
+                avisos_recentes=no_cnpj,
+            )
+
+        total = self._contar_na_hora(desde_hora)
+        if total >= max_global:
+            return ReservaAviso(
+                limite_sistemico=f"loja inteira: {total} avisos/h",
+                avisos_recentes=total,
+            )
+
         if linha is not None:
             linha.aviso_reservado_em = datetime.now(UTC)
+            linha.cnpj = cnpj
         return ReservaAviso(concedida=True)
+
+    def _contar_na_hora(
+        self, desde: datetime, cnpj: str | None = _SEM_FILTRO
+    ) -> int:
+        return sum(
+            1
+            for linha in self._linhas.values()
+            if linha.aviso_reservado_em is not None
+            and linha.aviso_reservado_em >= desde
+            and (cnpj is _SEM_FILTRO or linha.cnpj == cnpj)
+        )
 
     async def renovar(self, chave: ChaveEvento, *, dono: str, lease_s: int) -> bool:
         linha = self._linhas.get(chave)
@@ -294,6 +338,7 @@ class EventosMemoria:
             dono=None,
             proxima_tentativa_em=linha.proxima_tentativa_em if linha else None,
             aviso_reservado_em=linha.aviso_reservado_em if linha else None,
+            cnpj=linha.cnpj if linha else None,
         )
 
     async def contar_avisos(self, numero_pedido: str, desde: datetime) -> int:
@@ -406,7 +451,11 @@ class EventosPostgres:
         *,
         desde: datetime,
         desde_volume: datetime,
+        desde_hora: datetime,
         max_avisos: int,
+        cnpj: str | None = None,
+        max_global: int,
+        max_cnpj: int,
     ) -> ReservaAviso:
         """Ocupa uma vaga de MENSAGEM, se houver.
 
@@ -452,12 +501,54 @@ class EventosPostgres:
             if avisos >= max_avisos:
                 return ReservaAviso(cota_excedida=True, avisos_recentes=avisos)
 
+            # DISJUNTORES sistemicos. Ficam por ultimo: sao a rede de seguranca
+            # de ordem de grandeza, nao a regra do dia a dia.
+            #
+            # Contagem aproximada. O advisory lock que seguramos e do PEDIDO;
+            # cobrir a loja inteira exigiria um lock global, que serializaria o
+            # webhook todo. Um disjuntor pode errar por alguns eventos sem perder
+            # utilidade -- ele existe para pegar 10x, nao 1.02x.
+            no_cnpj = await self._contar_na_hora(sess, desde_hora, cnpj=cnpj)
+            if no_cnpj >= max_cnpj:
+                return ReservaAviso(
+                    limite_sistemico=f"CNPJ {cnpj or '(sem id)'}: {no_cnpj} avisos/h",
+                    avisos_recentes=no_cnpj,
+                )
+
+            total = await self._contar_na_hora(sess, desde_hora)
+            if total >= max_global:
+                return ReservaAviso(
+                    limite_sistemico=f"loja inteira: {total} avisos/h",
+                    avisos_recentes=total,
+                )
+
             await sess.execute(
                 update(EventoFrete)
                 .where(*self._filtro(chave))
                 .values(aviso_reservado_em=datetime.now(UTC))
             )
             return ReservaAviso(concedida=True)
+
+    async def _contar_na_hora(
+        self, sess: AsyncSession, desde: datetime, cnpj: str | None = _SEM_FILTRO
+    ) -> int:
+        """Avisos reservados na janela, em TODOS os pedidos.
+
+        Sem `cnpj` conta a loja inteira; com ele, so aquele CNPJ. O sentinela
+        distingue "nao filtrar" de "filtrar por CNPJ nulo", que sao coisas
+        diferentes -- eventos do segredo avulso tem `cnpj` nulo e precisam de
+        teto proprio, nao de isencao.
+        """
+        filtros: list[ColumnElement[bool]] = [EventoFrete.aviso_reservado_em >= desde]
+        if cnpj is not _SEM_FILTRO:
+            filtros.append(
+                EventoFrete.cnpj.is_(None) if cnpj is None else EventoFrete.cnpj == cnpj
+            )
+
+        total = await sess.scalar(
+            select(func.count()).select_from(EventoFrete).where(*filtros)
+        )
+        return int(total or 0)
 
     async def renovar(self, chave: ChaveEvento, *, dono: str, lease_s: int) -> bool:
         """Estende o lease, se ainda somos donos. `False` = perdemos a posse.

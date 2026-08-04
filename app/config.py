@@ -141,6 +141,25 @@ class Settings(BaseSettings):
     # Teto de TENTATIVAS por pedido na mesma janela. Limita CUSTO, nao mensagem.
     notificacao_max_tentativas_pedido: int = Field(default=20, ge=1, le=500)
 
+    # DISJUNTORES sistemicos, por hora. As demais travas sao todas por PEDIDO:
+    # quem tiver os segredos pode espalhar avisos legitimos por muitos pedidos
+    # diferentes, tres em cada, sem esbarrar em nada.
+    #
+    # Estourar aqui ADIA (HTTP 503), nao descarta -- a escada de reentrega da
+    # Frete Rapido reapresenta o evento mais tarde, e uma rajada legitima acima
+    # do teto sai com atraso em vez de sumir. E o que torna seguro deixar os
+    # valores relativamente apertados.
+    #
+    # A contagem e aproximada de proposito: exigir exatidao pediria um lock
+    # global, que serializaria todo o webhook. Disjuntor pega ordem de grandeza,
+    # nao conta ate o numero certo.
+    #
+    # PADROES PROVISORIOS: a Fase 1 ainda nao mediu o volume real. Recalibre com
+    # o relatorio 10 de `deploy/monitor.sql` antes de ligar o envio -- se
+    # dispararem durante a observacao, estao baixos demais.
+    notificacao_max_global_hora: int = Field(default=60, ge=1, le=10000)
+    notificacao_max_cnpj_hora: int = Field(default=30, ge=1, le=10000)
+
     # Espera minima antes de reprocessar a MESMA linha pendente. Sem isto, cada
     # repeticao readquiria o lease e reconsultava a Frete Rapido sem limite --
     # o teto de tentativas so barrava linha nova. Menor que o primeiro degrau da
