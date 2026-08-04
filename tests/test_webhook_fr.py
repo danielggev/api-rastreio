@@ -369,14 +369,85 @@ async def test_ocorrencia_nova_no_mesmo_pedido_dispara_de_novo() -> None:
     assert len(fila.enviados) == 2
 
 
-async def test_trava_anti_spam_contem_rajada_no_mesmo_pedido() -> None:
-    """Uma transportadora que posta cinco codigos seguidos nao vira cinco avisos."""
-    svc, _, fila = servico(s=settings(notificacao_max_por_pedido=2), codigo_atual=32)
+async def test_uma_ocorrencia_por_volume_gera_UM_aviso() -> None:
+    """Observado em producao no pedido 60422, e por isso esta suite existe.
 
-    for dia in range(1, 6):
+    Quatro ocorrencias do mesmo codigo em 21 minutos, uma por volume da remessa.
+    Datas distintas de verdade, entao a dedup normal (que inclui a data) nao
+    pega. Se acontecesse com "disponivel para retirada", o cliente receberia
+    varios avisos identicos para buscar a MESMA encomenda.
+    """
+    svc, _, fila = servico()
+
+    # Mesmos instantes reais do pedido 60422, so que com codigo acionavel.
+    for hora, minuto, seg in [(12, 53, 21), (12, 58, 38), (13, 3, 53), (13, 14, 51)]:
         await svc.processar(
             WebhookOcorrenciaFR.model_validate(
-                payload(codigo=32, data_ocorrencia=f"2026-08-0{dia} 09:00:00")
+                payload(data_ocorrencia=f"2026-08-04 {hora:02d}:{minuto:02d}:{seg:02d}")
+            )
+        )
+
+    assert len(fila.enviados) == 1
+
+
+async def test_mesmo_codigo_depois_da_janela_avisa_de_novo() -> None:
+    """O caso oposto, e por isso a regra e por JANELA e nao absoluta.
+
+    "Destinatario ausente" na segunda e de novo na quarta sao duas tentativas de
+    entrega diferentes -- o cliente precisa saber das duas.
+    """
+    svc, _, fila = servico(codigo_atual=32)
+    evento_a = WebhookOcorrenciaFR.model_validate(
+        payload(codigo=32, data_ocorrencia="2026-08-01 09:00:00")
+    )
+    await svc.processar(evento_a)
+
+    # A janela e contada a partir de `recebido_em`. Simula a passagem do tempo
+    # empurrando o registro anterior para tras.
+    for linha in svc._eventos._linhas.values():  # type: ignore[attr-defined]
+        linha.recebido_em -= timedelta(hours=48)
+
+    await svc.processar(
+        WebhookOcorrenciaFR.model_validate(
+            payload(codigo=32, data_ocorrencia="2026-08-03 09:00:00")
+        )
+    )
+
+    assert len(fila.enviados) == 2
+
+
+async def test_codigo_DIFERENTE_no_mesmo_pedido_avisa() -> None:
+    """A regra e por codigo, nao por pedido: dois fatos distintos, dois avisos."""
+    fr = FreteRapidoFalso(atual=232)
+    svc, _, fila = servico(fr=fr)
+
+    await svc.processar(WebhookOcorrenciaFR.model_validate(payload()))
+    fr.avancar(32)
+    await svc.processar(
+        WebhookOcorrenciaFR.model_validate(
+            payload(codigo=32, data_ocorrencia="2026-08-04 09:00:00")
+        )
+    )
+
+    assert len(fila.enviados) == 2
+
+
+async def test_trava_anti_spam_contem_rajada_no_mesmo_pedido() -> None:
+    """Uma transportadora que posta varios codigos seguidos nao vira varios avisos.
+
+    Aqui os codigos sao DIFERENTES -- a repeticao do mesmo codigo ja e barrada
+    antes, por outra regra. Este e o teto geral, que existe para o caso em que a
+    encomenda muda de estado varias vezes em poucas horas.
+    """
+    fr = FreteRapidoFalso(atual=232)
+    svc, _, fila = servico(fr=fr, s=settings(notificacao_max_por_pedido=2))
+
+    for i, codigo in enumerate([232, 32, 5, 38]):
+        if i:
+            fr.avancar(codigo)
+        await svc.processar(
+            WebhookOcorrenciaFR.model_validate(
+                payload(codigo=codigo, data_ocorrencia=f"2026-08-0{i + 1} 09:00:00")
             )
         )
 

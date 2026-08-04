@@ -250,12 +250,21 @@ class ServicoNotificacao:
             return Desfecho(StatusEvento.DESCARTADO, grupo, "ja em processamento")
 
         if reserva.cota_excedida:
-            motivo = (
-                f"limite anti-spam: {reserva.avisos_recentes} aviso(s) e "
-                f"{reserva.tentativas_recentes} tentativa(s) em "
-                f"{self._s.notificacao_janela_horas}h"
-            )
-            logger.warning("aviso contido para o pedido %s -- %s", numero, motivo)
+            if reserva.codigo_repetido:
+                # Nao e excesso, e repeticao do mesmo fato -- tipicamente uma
+                # ocorrencia por volume da remessa. Um pedido com 4 caixas
+                # geraria 4 avisos identicos "va buscar sua encomenda".
+                motivo = (
+                    f"ja avisado sobre o codigo {evento.codigo} deste pedido nas "
+                    f"ultimas {self._s.notificacao_janela_horas}h"
+                )
+            else:
+                motivo = (
+                    f"limite anti-spam: {reserva.avisos_recentes} aviso(s) e "
+                    f"{reserva.tentativas_recentes} tentativa(s) em "
+                    f"{self._s.notificacao_janela_horas}h"
+                )
+            logger.info("aviso contido para o pedido %s -- %s", numero, motivo)
             await self._eventos.concluir(chave, StatusEvento.DESCARTADO, motivo)
             return Desfecho(StatusEvento.DESCARTADO, grupo, motivo)
 

@@ -73,6 +73,10 @@ class Reserva:
     status: StatusEvento | None = None
     em_andamento: bool = False
     cota_excedida: bool = False
+    # Ja avisamos sobre ESTE codigo neste pedido, dentro da janela. Separado de
+    # `cota_excedida` porque o motivo e outro e o operador precisa distinguir:
+    # aqui nao houve excesso, houve repeticao do mesmo fato.
+    codigo_repetido: bool = False
     avisos_recentes: int = 0
     tentativas_recentes: int = 0
 
@@ -154,6 +158,16 @@ class EventosMemoria:
         if avisos >= max_avisos:
             return Reserva(cota_excedida=True, avisos_recentes=avisos)
 
+        # Mesmo pedido + mesmo codigo na janela = a MESMA mensagem. Ver a nota
+        # extensa na implementacao Postgres.
+        repetido = self._contar(
+            chave.numero_pedido, desde, _CONTAM_COMO_AVISO, agora, codigo=chave.codigo
+        )
+        if repetido:
+            return Reserva(
+                cota_excedida=True, codigo_repetido=True, avisos_recentes=repetido
+            )
+
         self._linhas[chave] = _Linha(
             status=StatusEvento.PENDENTE,
             recebido_em=linha.recebido_em if linha else agora,
@@ -167,10 +181,13 @@ class EventosMemoria:
         desde: datetime,
         estados: tuple[StatusEvento, ...] | None,
         agora: datetime,
+        codigo: int | None = None,
     ) -> int:
         total = 0
         for chave, linha in self._linhas.items():
             if chave.numero_pedido != numero_pedido or linha.recebido_em < desde:
+                continue
+            if codigo is not None and chave.codigo != codigo:
                 continue
             if estados is None:
                 # Tentativas: tudo que passou pelo gatilho.
@@ -280,6 +297,27 @@ class EventosPostgres:
             if avisos >= max_avisos:
                 return Reserva(cota_excedida=True, avisos_recentes=avisos)
 
+            # Mesmo pedido + mesmo codigo dentro da janela = a MESMA mensagem.
+            # Observado em producao no pedido 60422: quatro ocorrencias do codigo
+            # 15 em 21 minutos, uma por volume da remessa. Se isso acontecesse
+            # com "disponivel para retirada", o cliente receberia tres avisos
+            # identicos para ir buscar a mesma encomenda.
+            #
+            # A dedup normal nao pega porque a chave inclui a data, e as datas
+            # diferem de verdade -- sao ocorrencias distintas, com o mesmo
+            # significado para quem le.
+            #
+            # A JANELA e o que mantem correto o caso oposto: "destinatario
+            # ausente" na segunda e de novo na quarta sao duas tentativas de
+            # entrega diferentes, e o cliente precisa saber das duas.
+            repetido = await self._contar_avisos(
+                sess, chave.numero_pedido, desde, agora, codigo=chave.codigo
+            )
+            if repetido:
+                return Reserva(
+                    cota_excedida=True, codigo_repetido=True, avisos_recentes=repetido
+                )
+
             ate = agora + timedelta(seconds=lease_s)
             if existente is None:
                 await sess.execute(
@@ -307,26 +345,34 @@ class EventosPostgres:
             return Reserva(adquirida=True)
 
     async def _contar_avisos(
-        self, sess: AsyncSession, numero_pedido: str, desde: datetime, agora: datetime
+        self,
+        sess: AsyncSession,
+        numero_pedido: str,
+        desde: datetime,
+        agora: datetime,
+        codigo: int | None = None,
     ) -> int:
         """Avisos que sairam ou vao sair. Inclui os EM VOO (lease vivo).
 
         Contar so os concluidos deixaria duas corridas simultaneas verem zero.
+        Com `codigo`, restringe a um unico codigo de ocorrencia.
         """
-        total = await sess.scalar(
-            select(func.count())
-            .select_from(EventoFrete)
-            .where(
-                EventoFrete.numero_pedido == numero_pedido,
-                EventoFrete.recebido_em >= desde,
-                or_(
-                    EventoFrete.status.in_([s.value for s in _CONTAM_COMO_AVISO]),
-                    and_(
-                        EventoFrete.status == StatusEvento.PENDENTE.value,
-                        EventoFrete.processando_ate > agora,
-                    ),
+        filtros: list[ColumnElement[bool]] = [
+            EventoFrete.numero_pedido == numero_pedido,
+            EventoFrete.recebido_em >= desde,
+            or_(
+                EventoFrete.status.in_([s.value for s in _CONTAM_COMO_AVISO]),
+                and_(
+                    EventoFrete.status == StatusEvento.PENDENTE.value,
+                    EventoFrete.processando_ate > agora,
                 ),
-            )
+            ),
+        ]
+        if codigo is not None:
+            filtros.append(EventoFrete.codigo == codigo)
+
+        total = await sess.scalar(
+            select(func.count()).select_from(EventoFrete).where(*filtros)
         )
         return int(total or 0)
 

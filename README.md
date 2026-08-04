@@ -161,6 +161,15 @@ Shopify não devolve o campo como nulo — ela nega a **consulta inteira** com
 traz telefone e nome, cobre 98,8% dos pedidos despachados (medido em 03/08/2026)
 e não precisa de escopo novo. `tests/test_shopify.py` tem a regressão.
 
+**Uma ocorrência por volume não vira uma mensagem por volume.** Observado em
+produção: o pedido 60422 gerou quatro ocorrências do mesmo código em 21 minutos,
+com datas genuinamente distintas — uma por caixa da remessa. A deduplicação
+normal não pega, porque a chave inclui a data. Por isso vale uma regra a mais:
+dentro da janela anti-spam, o mesmo pedido com o mesmo código avisa **uma vez**.
+A janela é o que mantém correto o caso oposto — "destinatário ausente" na segunda
+e na quarta são duas tentativas de entrega diferentes, e o cliente deve saber das
+duas.
+
 **`sem_contato` responde 200, não 503.** É desfecho terminal, não falha: insistir
 gastaria as 12 tentativas da Frete Rápido num evento que nunca poderá ser
 entregue. O 503 fica reservado para o que *vale* reenviar — Shopify ou n8n fora
